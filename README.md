@@ -49,11 +49,33 @@ verdes para sempre. Aqui:
 `OPTIONS` retorna no topo do handler, então a checagem não dispara mensagem de
 WhatsApp, não grava lead e não consome crédito de IA na maioria das funções.
 
-> **Limitação conhecida e importante.** Isto prova que a função existe e faz
-> boot — **não** que a lógica interna dela funciona. Uma função com variável de
-> ambiente faltando ou token expirado responde o preflight e estoura em todo
-> POST. Fechar essa lacuna exige um endpoint de *dry-run* dentro de cada
-> function do PrimeDoctor.
+### Prontidão: publicada é diferente de operacional
+
+O preflight prova que a função existe e faz boot. Não prova que ela consegue
+trabalhar: `zapi-webhook` sem `ZAPI_WEBHOOK_SECRET` **recusa todas as
+requisições** e ainda assim responde o preflight normalmente. De fora, o webhook
+parece saudável enquanto nenhuma mensagem entra.
+
+Por isso o repositório do PrimeDoctor ganhou `supabase/functions/_shared/monitorPing.ts`.
+Cada função crítica declara de quais variáveis de ambiente depende; o monitor faz
+um GET com o header `X-Monitor-Ping` e recebe se a função está pronta. Nada de
+lógica de negócio roda — a checagem sai antes de qualquer efeito colateral.
+
+Para ativar, o **mesmo valor** precisa estar nos dois lugares:
+
+| Onde | Nome |
+|---|---|
+| Secrets do projeto Supabase (Edge Functions) | `MONITOR_PING_TOKEN` |
+| Secrets deste repositório (Actions) | `PD_MONITOR_PING_TOKEN` |
+
+Sem isso, o monitor continua checando se a função está publicada e apenas
+informa que a prontidão não foi verificada — nada é reprovado por engano.
+O ping devolve só **nomes** de variáveis ausentes, nunca valores, e compara o
+token por digest SHA-256.
+
+> **O que ainda fica de fora.** O ping confere presença de secrets, não a
+> validade deles: um token Z-API presente porém expirado passa. Cobrir isso
+> exigiria uma chamada real ao provedor, com custo e efeito colateral.
 
 ### Por que a asserção de linhas no banco importa
 
@@ -124,6 +146,7 @@ Não use uma conta de pessoa real.
 |---|---|
 | `PD_MONITOR_EMAIL` | e-mail do usuário-monitor |
 | `PD_MONITOR_PASSWORD` | senha do usuário-monitor |
+| `PD_MONITOR_PING_TOKEN` | mesmo valor de `MONITOR_PING_TOKEN` nos secrets do Supabase (veja "Prontidão" acima) |
 
 Sem esses secrets o monitor continua rodando, mas as checagens autenticadas
 ficam como *Não verificado* — e o status geral **nunca** exibe "Todos os

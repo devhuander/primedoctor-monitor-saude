@@ -78,11 +78,15 @@ export async function checkEdgeFunctions() {
 
   // ---- verificação real ----
   const results = [];
+  let pingDisponivel = 0;
+  let pingDesativado = 0;
+
   for (const fn of CONFIG.edge.functions) {
     const r = await preflight(fn.name);
 
     let status;
     let detail;
+    let publicada = false;
     if (r.status === 404) {
       status = STATUS.FAIL;
       detail = 'NÃO ENCONTRADA — a função sumiu do deploy';
@@ -97,11 +101,33 @@ export async function checkEdgeFunctions() {
       status = STATUS.FAIL;
       detail = `a função existe mas falhou ao subir (HTTP ${r.status})`;
     } else {
+      publicada = true;
       status = statusFromLatency(r.ms, T.edgeWarn, T.edgeFail);
       detail =
         status === STATUS.OK
           ? `publicada e roteável · HTTP ${r.status}`
           : `publicada, porém lenta para acordar · HTTP ${r.status}`;
+    }
+
+    // ---- prontidão: a função tem os secrets de que precisa? ----
+    let readiness = null;
+    if (publicada && CONFIG.pingToken) {
+      readiness = await readinessPing(url, anonKey, fn.name);
+      if (readiness.state === 'pronta') {
+        pingDisponivel++;
+        detail += ' · pronta (secrets presentes)';
+      } else if (readiness.state === 'faltando') {
+        pingDisponivel++;
+        status = STATUS.FAIL;
+        detail = `PUBLICADA MAS NÃO OPERACIONAL — faltam: ${readiness.missing.join(', ')}`;
+      } else if (readiness.state === 'desativado') {
+        pingDesativado++;
+        detail += ' · prontidão não verificada (MONITOR_PING_TOKEN ausente no Supabase)';
+      } else if (readiness.state === 'sem-ping') {
+        detail += ' · sem endpoint de prontidão nesta função';
+      } else {
+        detail += ` · prontidão indeterminada (${readiness.detail})`;
+      }
     }
 
     results.push({
@@ -111,7 +137,11 @@ export async function checkEdgeFunctions() {
       status,
       latencyMs: r.status === 0 ? null : r.ms,
       detail,
-      meta: { httpStatus: r.status, cors: r.headers?.['access-control-allow-origin'] ?? null },
+      meta: {
+        httpStatus: r.status,
+        cors: r.headers?.['access-control-allow-origin'] ?? null,
+        readiness: readiness ? { state: readiness.state, missing: readiness.missing } : null,
+      },
     });
   }
 
@@ -136,6 +166,9 @@ export async function checkEdgeFunctions() {
   if (criticalBad.length) parts.push(`${criticalBad.length} crítica(s) com problema: ${criticalBad.map((b) => b.key).join(', ')}`);
   else parts.push(`${criticals.length - 1} função(ões) crítica(s) publicadas`);
   if (nonCriticalBad.length) parts.push(`${nonCriticalBad.length} não crítica(s) com problema`);
+  if (!CONFIG.pingToken) parts.push('prontidão não verificada (sem PD_MONITOR_PING_TOKEN)');
+  else if (pingDesativado) parts.push(`${pingDesativado} sem MONITOR_PING_TOKEN no Supabase`);
+  else if (pingDisponivel) parts.push(`${pingDisponivel} com prontidão confirmada`);
 
   const latencies = results.filter((r) => r.latencyMs != null).map((r) => r.latencyMs);
 
@@ -146,6 +179,55 @@ export async function checkEdgeFunctions() {
     latencyMs: latencies.length ? Math.round(latencies.reduce((a, b) => a + b, 0) / latencies.length) : null,
     items: results,
     detail: parts.join(' · '),
-    meta: { canaryValid: true },
+    meta: { canaryValid: true, readinessChecked: !!CONFIG.pingToken },
+  };
+}
+
+/**
+ * Pergunta à função se ela está pronta para trabalhar.
+ *
+ * O preflight prova que a função existe e faz boot. Não prova que ela consegue
+ * fazer o trabalho: `zapi-webhook` sem `ZAPI_WEBHOOK_SECRET` recusa todas as
+ * requisições e ainda assim responde o preflight normalmente — o webhook parece
+ * saudável de fora enquanto nenhuma mensagem entra.
+ *
+ * O endpoint vive em `_shared/monitorPing.ts`, no repositório do PrimeDoctor.
+ * É um GET, não executa lógica de negócio e devolve só NOMES de variáveis
+ * ausentes, nunca valores.
+ */
+async function readinessPing(url, anonKey, slug) {
+  const r = await timedFetch(`${url}/functions/v1/${slug}`, {
+    method: 'GET',
+    headers: {
+      apikey: anonKey,
+      Authorization: `Bearer ${anonKey}`,
+      'X-Monitor-Ping': CONFIG.pingToken,
+    },
+    maxBody: 2000,
+    timeoutMs: CONFIG.timeouts.edge,
+  });
+
+  let body = {};
+  try { body = JSON.parse(r.body || '{}'); } catch { /* resposta não-JSON */ }
+
+  // Função ainda sem o ping instalado responde a lógica normal dela.
+  if (typeof body.ok !== 'boolean' || !body.fn) {
+    return { state: 'sem-ping', missing: [], detail: `HTTP ${r.status}` };
+  }
+  if (body.reason === 'ping_desativado') {
+    return { state: 'desativado', missing: [], detail: body.detail || '' };
+  }
+  if (r.status === 401) {
+    return { state: 'indeterminado', missing: [], detail: 'token de ping recusado' };
+  }
+  if (body.ready === true) {
+    return { state: 'pronta', missing: [], detail: '' };
+  }
+  return {
+    state: 'faltando',
+    missing: Array.isArray(body.missingRequired) && body.missingRequired.length
+      ? body.missingRequired
+      : ['verificação extra falhou'],
+    detail: body.extra?.detail || '',
   };
 }

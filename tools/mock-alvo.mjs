@@ -13,6 +13,10 @@ export function startMock(scenario = {}) {
     rlsEmpty = [],             // tabelas que devolvem 200 com zero linhas
     htmlWithoutBundles = false,
     slowMs = 0,
+    pingToken = 'ping-mock',   // token esperado no header X-Monitor-Ping
+    pingDisabled = false,      // MONITOR_PING_TOKEN não configurado no projeto
+    pingAusente = [],          // funções que ainda não têm o endpoint de ping
+    faltandoSecrets = {},      // { 'zapi-webhook': ['ZAPI_WEBHOOK_SECRET'] }
   } = scenario;
 
   const server = http.createServer(async (req, res) => {
@@ -69,6 +73,20 @@ export function startMock(scenario = {}) {
       if (canaryBroken && slug.includes('canary')) return send(200, { ok: true });
       if (slug.includes('canary')) return send(404, { code: 'NOT_FOUND' });
       if (missingFunctions.includes(slug)) return send(404, { code: 'NOT_FOUND' });
+
+      // Ping de prontidão (_shared/monitorPing.ts no repositório do PrimeDoctor).
+      const pingHeader = req.headers['x-monitor-ping'];
+      if (pingHeader && !pingAusente.includes(slug)) {
+        if (pingDisabled) {
+          return send(503, { ok: false, fn: slug, reason: 'ping_desativado', detail: 'MONITOR_PING_TOKEN não está configurado neste projeto' });
+        }
+        if (pingHeader !== pingToken) return send(401, { ok: false });
+        const missing = faltandoSecrets[slug] || [];
+        return send(missing.length ? 503 : 200, {
+          ok: true, fn: slug, ready: missing.length === 0,
+          missingRequired: missing, missingOptional: [], extra: null, ts: new Date().toISOString(),
+        });
+      }
       if (slug === 'system-health' && supabaseDown) return send(503, {});
       if (slug === 'system-health') return send(200, { ok: true, db: 'ok', latency_ms: 42, ts: new Date().toISOString() });
       return send(200, { ok: true }, { 'Access-Control-Allow-Origin': '*' });

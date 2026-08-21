@@ -13,7 +13,7 @@ const cases = [];
 let failures = 0;
 
 function test(name, scenario, assertions, opts = {}) {
-  cases.push({ name, scenario, assertions, noAuth: !!opts.noAuth });
+  cases.push({ name, scenario, assertions, noAuth: !!opts.noAuth, ping: !!opts.ping });
 }
 
 /* ------------------------------------------------------------------ casos */
@@ -123,7 +123,58 @@ test(
   { noAuth: true },
 );
 
+
+/* ---- prontidão das edge functions (fase 2: _shared/monitorPing.ts) ---- */
+
+test(
+  'secret faltando: função publicada mas NÃO operacional vira falha',
+  { faltandoSecrets: { 'zapi-webhook': ['ZAPI_WEBHOOK_SECRET'] } },
+  ({ edge }) => {
+    const fn = edge.items.find((i) => i.key === 'zapi-webhook');
+    assert.equal(fn.status, 'fail', 'função sem secret obrigatório tem que falhar');
+    assert.match(fn.detail, /NÃO OPERACIONAL/);
+    assert.match(fn.detail, /ZAPI_WEBHOOK_SECRET/);
+    assert.equal(edge.status, 'fail');
+  },
+  { ping: true },
+);
+
+test(
+  'com todos os secrets, a prontidão é confirmada explicitamente',
+  {},
+  ({ edge }) => {
+    const fn = edge.items.find((i) => i.key === 'zapi-webhook');
+    assert.equal(fn.status, 'ok');
+    assert.match(fn.detail, /pronta \(secrets presentes\)/);
+    assert.equal(fn.meta.readiness.state, 'pronta');
+  },
+  { ping: true },
+);
+
+test(
+  'MONITOR_PING_TOKEN ausente no Supabase não vira falha, e sim aviso',
+  { pingDisabled: true },
+  ({ edge }) => {
+    assert.equal(edge.status, 'ok', 'ping desativado não pode reprovar a função');
+    const fn = edge.items.find((i) => i.key === 'zapi-webhook');
+    assert.match(fn.detail, /prontidão não verificada/);
+  },
+  { ping: true },
+);
+
+test(
+  'função que ainda não recebeu o ping continua sendo avaliada pelo preflight',
+  { pingAusente: ['ai-engine'] },
+  ({ edge }) => {
+    const fn = edge.items.find((i) => i.key === 'ai-engine');
+    assert.equal(fn.status, 'ok');
+    assert.match(fn.detail, /sem endpoint de prontidão/);
+  },
+  { ping: true },
+);
+
 /* ------------------------------------------------------------- execução */
+
 
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -147,6 +198,7 @@ for (const c of cases) {
         PD_CONTROL_TARGETS: `${mock.baseUrl}/__control__`,
         PD_MONITOR_EMAIL: c.noAuth ? '' : 'monitor@example.com',
         PD_MONITOR_PASSWORD: c.noAuth ? '' : 'senha-mock',
+        PD_MONITOR_PING_TOKEN: c.ping ? 'ping-mock' : '',
       },
       maxBuffer: 20 * 1024 * 1024,
       timeout: 90_000,

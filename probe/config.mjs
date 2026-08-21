@@ -35,6 +35,12 @@ export const CONFIG = {
     password: process.env.PD_MONITOR_PASSWORD || '',
   },
 
+  // Token do ping de prontidão das edge functions (_shared/monitorPing.ts no
+  // repositório do PrimeDoctor). Precisa ter o MESMO valor do secret
+  // MONITOR_PING_TOKEN no projeto Supabase. Sem ele, o monitor continua
+  // checando se a função está publicada, mas não se ela está pronta.
+  pingToken: process.env.PD_MONITOR_PING_TOKEN || '',
+
   // Alvos de controle: servem para distinguir "o PrimeDoctor caiu" de
   // "o runner do monitor está sem rede". Se TODOS falharem, o veredito da
   // execução inteira vira "indeterminado" e nenhum alarme é disparado.
