@@ -1,0 +1,20 @@
+{
+  "name": "primedoctor-monitor-saude",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Monitor de saúde independente do sistema PrimeDoctor",
+  "scripts": {
+    "check": "node probe/run.mjs",
+    "check:fast": "node probe/run.mjs --no-browser",
+    "preview": "node tools/preview-server.mjs",
+    "demo": "node tools/gerar-dados-demo.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "playwright": "1.49.1",
+    "ws": "8.18.0"
+  }
+}

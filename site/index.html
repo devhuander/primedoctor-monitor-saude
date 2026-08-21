@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>PrimeDoctor — Monitor de Saúde</title>
+<meta name="description" content="Página independente de status e saúde do sistema PrimeDoctor: hospedagem, banco de dados, integrações e tempo de carregamento." />
+<meta name="robots" content="noindex" />
+<meta name="theme-color" content="#0b1020" />
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='22' fill='%236366f1'/%3E%3Cpath d='M18 54h14l8-20 12 34 9-22 6 8h15' fill='none' stroke='white' stroke-width='8' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+<div class="wrap">
+
+  <div class="top">
+    <div class="brand">
+      <div class="logo">PD</div>
+      <div>
+        <h1>PrimeDoctor — Monitor de Saúde</h1>
+        <p>Monitoramento externo e independente · <span id="target-url">primedoctor.app</span></p>
+      </div>
+    </div>
+    <div class="meta" id="meta">carregando…</div>
+  </div>
+
+  <div id="content">
+    <div class="skeleton">Carregando dados de verificação…</div>
+  </div>
+
+</div>
+<script src="./app.js"></script>
+</body>
+</html>

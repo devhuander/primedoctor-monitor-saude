@@ -1,0 +1,8 @@
+node_modules/
+_site/
+preview-local.html
+demo-data/
+.DS_Store
+*.log
+.env
+.env.local
