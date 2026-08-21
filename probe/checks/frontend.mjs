@@ -1,12 +1,19 @@
 import { CONFIG, STATUS, worstStatus, statusFromLatency } from '../config.mjs';
-import { timedFetch, resolveDns, inspectTls, identifyHost } from '../lib/http.mjs';
+import { timedFetch, resolveDns, inspectTls, identifyHost, checkTransport } from '../lib/http.mjs';
+import { safeUrl } from '../lib/sanitize.mjs';
 
 const T = CONFIG.thresholds;
+const UA = 'PrimeDoctorHealthMonitor/1.0 (+https://github.com/devhuander/primedoctor-monitor-saude)';
 
 /**
- * Saúde da hospedagem do front-end (onde o app está publicado).
- * Roda no runner do GitHub Actions, sem CORS no caminho, então enxerga
- * status HTTP reais — coisa que uma página estática no navegador não consegue.
+ * Saúde da hospedagem do front-end.
+ *
+ * Roda no runner do GitHub Actions, sem CORS no caminho, então enxerga status
+ * HTTP reais — coisa que uma página estática no navegador não consegue.
+ *
+ * Supressão de cascata: se o documento nem chega, as checagens dependentes
+ * viram "não verificável" em vez de gerar uma parede de vermelho que esconde
+ * a causa raiz.
  */
 export async function checkFrontend() {
   const base = CONFIG.app.baseUrl;
@@ -18,44 +25,39 @@ export async function checkFrontend() {
   items.push({
     key: 'dns',
     label: 'Resolução DNS',
-    status: dnsRes.ok ? statusFromLatency(dnsRes.ms, 400, 2000) : STATUS.FAIL,
+    status: dnsRes.ok ? statusFromLatency(dnsRes.ms, 500, 3000) : STATUS.FAIL,
     latencyMs: dnsRes.ms,
-    detail: dnsRes.ok ? `${dnsRes.addresses.length} endereço(s)` : dnsRes.error,
+    detail: dnsRes.ok ? `${dnsRes.addresses.length} endereço(s) · ${hostname}` : dnsRes.error,
     meta: { addresses: dnsRes.addresses },
   });
 
   // --- TLS ---
-  const tlsRes = await inspectTls(hostname);
-  let tlsStatus = STATUS.OK;
-  if (!tlsRes.ok) tlsStatus = STATUS.FAIL;
-  else if (tlsRes.daysLeft != null && tlsRes.daysLeft <= T.tlsExpiryFailDays) tlsStatus = STATUS.FAIL;
-  else if (tlsRes.daysLeft != null && tlsRes.daysLeft <= T.tlsExpiryWarnDays) tlsStatus = STATUS.DEGRADED;
-  items.push({
-    key: 'tls',
-    label: 'Certificado TLS',
-    status: tlsStatus,
-    latencyMs: tlsRes.ms,
-    detail: tlsRes.ok
-      ? `expira em ${tlsRes.daysLeft} dia(s) · ${tlsRes.issuer || 'emissor desconhecido'}`
-      : tlsRes.error,
-    meta: { daysLeft: tlsRes.daysLeft, issuer: tlsRes.issuer, protocol: tlsRes.protocol, validTo: tlsRes.validTo },
-  });
+  const tlsItem = await checkTransport({ url: base, key: 'tls', label: 'Certificado TLS', thresholds: T });
+  if (tlsItem) items.push(tlsItem);
 
   // --- Documento raiz ---
-  const root = await timedFetch(base + '/', { headers: { 'User-Agent': ua() } });
+  const root = await timedFetch(base + '/', { headers: { 'User-Agent': UA } });
   const hostInfo = identifyHost(root.headers);
   const html = root.body || '';
   const hasRoot = /<div\s+id=["']root["']/i.test(html);
-  const title = (html.match(/<title>([^<]*)<\/title>/i) || [])[1]?.trim() || null;
+  const assetUrls = root.status > 0 ? extractBuiltAssets(html, base) : [];
+  const buildFingerprint = fingerprint(assetUrls);
+  const reachable = root.status > 0;
 
   let rootStatus;
   let rootDetail;
-  if (!root.ok) {
+  if (!reachable) {
     rootStatus = STATUS.FAIL;
-    rootDetail = root.error ? root.error : `HTTP ${root.status}`;
+    rootDetail = root.error;
+  } else if (!root.ok) {
+    rootStatus = STATUS.FAIL;
+    rootDetail = `o servidor devolveu HTTP ${root.status}`;
   } else if (!hasRoot) {
     rootStatus = STATUS.FAIL;
     rootDetail = 'HTTP 200 mas o HTML não contém o ponto de montagem do app (#root)';
+  } else if (!buildFingerprint) {
+    rootStatus = STATUS.FAIL;
+    rootDetail = 'HTML servido sem nenhum bundle do build referenciado — deploy provavelmente quebrado';
   } else {
     rootStatus = statusFromLatency(root.ms, T.httpWarn, T.httpFail);
     rootDetail = `HTTP 200 · ${formatBytes(root.bytes)} · ${hostInfo.detected.join(', ')}`;
@@ -66,18 +68,18 @@ export async function checkFrontend() {
     status: rootStatus,
     latencyMs: root.ms,
     detail: rootDetail,
-    meta: { title, bytes: root.bytes, host: hostInfo },
+    meta: {
+      title: (html.match(/<title>([^<]*)<\/title>/i) || [])[1]?.trim() || null,
+      bytes: root.bytes,
+      host: hostInfo,
+      buildFingerprint,
+    },
   });
 
-  // Se o documento nem carregou, as checagens seguintes não são verificáveis.
-  // Reportá-las como "falha" seria ruído: a causa raiz já está acima.
-  const documentReachable = root.status > 0;
-
-  // --- Bundles gerados pelo build (JS/CSS) ---
-  const assetUrls = documentReachable ? extractBuiltAssets(html, base) : [];
+  // --- Bundles gerados pelo build ---
   const assetResults = [];
   for (const url of assetUrls.slice(0, 8)) {
-    const r = await timedFetch(url, { method: 'GET', readBody: false, headers: { 'User-Agent': ua() } });
+    const r = await timedFetch(url, { readBody: false, headers: { 'User-Agent': UA } });
     assetResults.push({
       url: url.replace(base, ''),
       status: r.status,
@@ -91,29 +93,29 @@ export async function checkFrontend() {
   items.push({
     key: 'bundles',
     label: 'Bundles do build (JS/CSS)',
-    status: !documentReachable
+    status: !reachable
       ? STATUS.UNKNOWN
       : assetResults.length === 0
-        ? STATUS.DEGRADED
+        ? STATUS.FAIL
         : brokenAssets.length > 0
           ? STATUS.FAIL
           : statusFromLatency(Math.max(...assetResults.map((a) => a.ms)), T.httpWarn, T.httpFail),
     latencyMs: assetResults.length ? Math.max(...assetResults.map((a) => a.ms)) : null,
-    detail: !documentReachable
+    detail: !reachable
       ? 'não verificável — o documento HTML não chegou a carregar'
       : assetResults.length === 0
-        ? 'nenhum bundle referenciado no HTML (build pode não ter sido aplicado)'
+        ? 'nenhum bundle referenciado no HTML'
         : brokenAssets.length > 0
           ? `${brokenAssets.length} de ${assetResults.length} bundle(s) não carregaram`
           : `${assetResults.length} bundle(s) OK`,
-    meta: { assets: assetResults, buildFingerprint: fingerprint(assetUrls) },
+    meta: { assets: assetResults, buildFingerprint },
   });
 
   // --- Assets estáticos ---
   const staticResults = [];
-  if (documentReachable) {
+  if (reachable) {
     for (const path of CONFIG.app.staticAssets) {
-      const r = await timedFetch(base + path, { readBody: false, headers: { 'User-Agent': ua() } });
+      const r = await timedFetch(base + path, { readBody: false, headers: { 'User-Agent': UA } });
       staticResults.push({ path, status: r.status, ms: r.ms, ok: r.ok, error: r.error });
     }
   }
@@ -121,7 +123,7 @@ export async function checkFrontend() {
   items.push({
     key: 'static',
     label: 'Arquivos estáticos (manifest, favicon, robots)',
-    status: !documentReachable
+    status: !reachable
       ? STATUS.UNKNOWN
       : brokenStatic.length === 0
         ? STATUS.OK
@@ -129,7 +131,7 @@ export async function checkFrontend() {
           ? STATUS.FAIL
           : STATUS.DEGRADED,
     latencyMs: staticResults.length ? Math.round(avg(staticResults.map((s) => s.ms))) : null,
-    detail: !documentReachable
+    detail: !reachable
       ? 'não verificável — o servidor não respondeu'
       : brokenStatic.length === 0
         ? `${staticResults.length} arquivo(s) OK`
@@ -138,16 +140,14 @@ export async function checkFrontend() {
   });
 
   // --- Fallback de SPA ---
-  const spa = documentReachable
-    ? await timedFetch(base + CONFIG.app.spaFallbackRoute, { headers: { 'User-Agent': ua() } })
-    : null;
+  const spa = reachable ? await timedFetch(base + CONFIG.app.spaFallbackRoute, { headers: { 'User-Agent': UA } }) : null;
   const spaOk = !!spa && spa.status === 200 && /<div\s+id=["']root["']/i.test(spa.body || '');
   items.push({
     key: 'spa-fallback',
-    label: 'Roteamento SPA (deep link)',
-    status: !documentReachable ? STATUS.UNKNOWN : spaOk ? STATUS.OK : STATUS.DEGRADED,
+    label: 'Roteamento SPA (link direto)',
+    status: !reachable ? STATUS.UNKNOWN : spaOk ? STATUS.OK : STATUS.DEGRADED,
     latencyMs: spa?.ms ?? null,
-    detail: !documentReachable
+    detail: !reachable
       ? 'não verificável — o servidor não respondeu'
       : spaOk
         ? 'rotas internas devolvem o app corretamente'
@@ -157,13 +157,64 @@ export async function checkFrontend() {
     meta: {},
   });
 
+  // --- Domínios alternativos ---
+  for (const alt of CONFIG.app.alternateUrls) {
+    items.push(await checkAlternate(alt, buildFingerprint));
+  }
+
   return {
     key: 'frontend',
     label: 'Hospedagem e front-end',
     status: worstStatus(items.map((i) => i.status)),
     latencyMs: root.ms,
     items,
-    meta: { host: hostInfo, url: base },
+    meta: { host: hostInfo, url: base, buildFingerprint },
+  };
+}
+
+/**
+ * Sonda leve para um domínio alternativo do mesmo app.
+ * Além de estar no ar, ele deve servir o MESMO build do domínio principal —
+ * divergência aí significa deploy pela metade ou cache preso.
+ */
+async function checkAlternate(url, primaryFingerprint) {
+  const key = `alt:${new URL(url).hostname}`;
+  const label = `Domínio alternativo (${new URL(url).hostname})`;
+  const hostname = new URL(url).hostname;
+
+  const dnsRes = await resolveDns(hostname);
+  if (!dnsRes.ok) {
+    return { key, label, status: STATUS.FAIL, latencyMs: dnsRes.ms, detail: `DNS: ${dnsRes.error}`, meta: {} };
+  }
+
+  const tlsItem = await checkTransport({ url, key, label, thresholds: T });
+  if (tlsItem && tlsItem.status === STATUS.FAIL) {
+    return { ...tlsItem, detail: `TLS: ${tlsItem.detail}` };
+  }
+  const tlsDaysLeft = tlsItem?.meta?.daysLeft ?? null;
+
+  const r = await timedFetch(url + '/', { headers: { 'User-Agent': UA } });
+  if (r.status === 0) {
+    return { key, label, status: STATUS.FAIL, latencyMs: r.ms, detail: r.error, meta: {} };
+  }
+  if (!r.ok) {
+    return { key, label, status: STATUS.FAIL, latencyMs: r.ms, detail: `HTTP ${r.status}`, meta: {} };
+  }
+
+  const fp = fingerprint(extractBuiltAssets(r.body || '', url));
+  const sameBuild = !primaryFingerprint || !fp || fp === primaryFingerprint;
+
+  return {
+    key,
+    label,
+    status: !fp ? STATUS.FAIL : sameBuild ? statusFromLatency(r.ms, T.httpWarn, T.httpFail) : STATUS.DEGRADED,
+    latencyMs: r.ms,
+    detail: !fp
+      ? 'no ar, mas sem bundle do build no HTML'
+      : sameBuild
+        ? `no ar${tlsDaysLeft != null ? ` · TLS expira em ${tlsDaysLeft} dia(s)` : ''} · mesmo build do domínio principal`
+        : 'no ar, porém servindo um BUILD DIFERENTE do domínio principal — deploy pela metade ou cache preso',
+    meta: { buildFingerprint: fp, tlsDaysLeft, url: safeUrl(url) },
   };
 }
 
@@ -173,22 +224,22 @@ function extractBuiltAssets(html, base) {
   let m;
   while ((m = re.exec(html))) {
     const raw = m[1];
-    if (raw.startsWith('http') && !raw.startsWith(base)) continue; // ignora CDN de terceiros
-    try {
-      urls.add(new URL(raw, base).toString());
-    } catch { /* ignore */ }
+    if (/^https?:\/\//i.test(raw) && !raw.startsWith(base)) continue; // ignora CDN de terceiros
+    try { urls.add(new URL(raw, base).toString()); } catch { /* ignore */ }
   }
   return [...urls];
 }
 
+/**
+ * O nome dos bundles muda a cada build (hash do Vite). É o campo mais útil
+ * durante um incidente: "o bundle mudou logo antes de ficar vermelho?".
+ */
 function fingerprint(urls) {
-  // O nome dos bundles muda a cada build; serve para detectar novo deploy.
-  const names = urls.map((u) => u.split('/').pop()).sort();
-  return names.join('|').slice(0, 300) || null;
-}
-
-function ua() {
-  return 'PrimeDoctorHealthMonitor/1.0 (+https://github.com/devhuander/primedoctor-monitor-saude)';
+  const names = urls
+    .map((u) => { try { return new URL(u).pathname.split('/').pop(); } catch { return null; } })
+    .filter(Boolean)
+    .sort();
+  return names.length ? names.join('|').slice(0, 300) : null;
 }
 
 function avg(a) {

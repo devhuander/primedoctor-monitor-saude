@@ -15,33 +15,93 @@ justamente para mostrar que caiu.
 
 ## O que é verificado
 
-| Área | O que a sonda faz |
-|---|---|
-| **Hospedagem e front-end** | Resolve o DNS, inspeciona o certificado TLS (e quantos dias faltam para expirar), baixa o HTML e confere o ponto de montagem do app, baixa cada bundle JS/CSS gerado pelo build, checa `manifest.json` / `favicon.ico` / `robots.txt` e testa se uma rota profunda devolve o app (fallback de SPA). |
-| **Banco de dados e backend** | GoTrue (`/auth/v1/health`), PostgREST, o healthcheck próprio do PrimeDoctor (`system-health`, que faz consulta real no Postgres), leitura de 6 tabelas via RLS, conexão WebSocket no Realtime e o serviço de Storage. |
-| **Funções de borda** | 14 edge functions críticas, via `OPTIONS` (preflight CORS). Detecta a regressão silenciosa mais perigosa: uma função sumir do deploy e o webhook parar sem ninguém perceber. |
-| **Experiência de carregamento** | Chromium real abre o app, autentica com o usuário-monitor e mede: TTFB, DOMContentLoaded, load, FCP, LCP, CLS, tempo até o app montar, erros de JavaScript no console e requisições que falharam. |
-| **Plataformas de terceiros** | Status oficial de Supabase, Lovable, Cloudflare e GitHub. Responde "o problema é meu ou do fornecedor?". Informativo — nunca derruba o status geral. |
+| Área | O que a sonda faz | O que isso prova |
+|---|---|---|
+| **Hospedagem e front-end** | DNS, certificado TLS (validade **e** se cobre o domínio), documento HTML, cada bundle JS/CSS do build, `manifest.json`/`favicon.ico`/`robots.txt`, roteamento de link direto e o **domínio alternativo** servindo o mesmo build | o site está no ar, servindo um build completo, por todos os domínios |
+| **Banco de dados e backend** | GoTrue, PostgREST, o healthcheck próprio do PrimeDoctor, leitura de 5 tabelas **com asserção de linhas**, WebSocket do Realtime e o Storage | o caminho rede → PostgREST → Postgres → RLS funciona de ponta a ponta |
+| **Funções de borda** | 13 edge functions críticas, via preflight CORS autenticado, mais um **canário 404** que valida a própria sonda | as funções existem, estão roteáveis e sobem |
+| **Experiência de carregamento** | Chromium real: TTFB, DOMContentLoaded, FCP, LCP, CLS, tempo até o app montar, login pelo formulário real, erros de console e requisições falhas | um usuário de verdade consegue abrir e entrar no sistema |
+| **Plataformas de terceiros** | status oficial de Supabase, Lovable, Cloudflare e GitHub | responde "o problema é meu ou do fornecedor?" — informativo, não derruba o status geral |
 
-### Por que `OPTIONS` nas edge functions
+### Antes de julgar, o monitor testa a si mesmo
 
-`OPTIONS` acorda a função e devolve os headers de CORS **sem executar a lógica de
-negócio**. A checagem não dispara mensagem de WhatsApp, não grava lead, não
-consome crédito de IA. É seguro rodar de hora em hora, para sempre.
+Um runner sem rede produz exatamente a mesma saída de uma queda total do
+sistema: tudo vermelho, incidente aberto, alarme disparado. Por isso cada
+execução começa batendo em **alvos de controle** externos. Se nenhum responder,
+o veredito é *"o monitor está sem rede"* e **nada é alarmado** — o monitor não
+tem autoridade para afirmar que o sistema caiu.
+
+### Por que preflight CORS nas edge functions — e o que ele NÃO prova
+
+O relay do Supabase valida o JWT **antes** de resolver o slug da função. Como
+quase todas as functions do PrimeDoctor têm `verify_jwt = true`, uma sonda que
+mande só a `apikey` recebe 401 tanto de função publicada quanto de função
+**deletada**. Traduzir esse 401 para "publicada" deixaria a maioria dos cartões
+verdes para sempre. Aqui:
+
+1. a requisição vai com `Authorization: Bearer <anonKey>`, para que um slug
+   inexistente devolva 404 de verdade;
+2. 401/403 **nunca** vira "ok" — vira *não verificável*;
+3. um **canário** (slug que não existe) precisa devolver 404 a cada execução.
+   Se parar de devolver, a seção inteira se declara não confiável em vez de
+   continuar publicando verde.
+
+`OPTIONS` retorna no topo do handler, então a checagem não dispara mensagem de
+WhatsApp, não grava lead e não consome crédito de IA na maioria das funções.
+
+> **Limitação conhecida e importante.** Isto prova que a função existe e faz
+> boot — **não** que a lógica interna dela funciona. Uma função com variável de
+> ambiente faltando ou token expirado responde o preflight e estoura em todo
+> POST. Fechar essa lacuna exige um endpoint de *dry-run* dentro de cada
+> function do PrimeDoctor.
+
+### Por que a asserção de linhas no banco importa
+
+`HTTP 200` com lista vazia é o sintoma clássico de policy de RLS quebrada por
+migration: todo usuário vê telas em branco e um monitor ingênuo fica verde.
+As sondas de `profiles`, `clinic_members` e `clinics` exigem **pelo menos uma
+linha visível** — o usuário-monitor tem obrigatoriamente que enxergar a própria.
+
+### Erros de JavaScript não derrubam o status
+
+O app tem centenas de `console.error` legítimos, e SPAs disparam exceções
+benignas o tempo todo (fetch abortado em unmount, SDK de terceiro). Tratar isso
+como falha garantiria vermelho permanente — e uma página vermelha permanente é
+uma página que ninguém abre. Os erros aparecem como **informativos**,
+categorizados e contados.
+
+### Uma execução ruim não é um alarme
+
+O runner do GitHub tem vizinho barulhento e cold start. `n=1` produz alarme
+falso e treina o time a ignorar a página. O alarme só dispara depois de **duas
+execuções ruins consecutivas**. A página mostra claramente quando uma falha
+ainda não foi confirmada.
 
 ---
 
 ## Privacidade e segurança
 
-- Nenhum dado de paciente, clínica ou usuário é lido, gravado ou exibido.
-  As sondas registram apenas **latência, código HTTP e sucesso/erro**.
-- Toda mensagem de erro passa por um filtro que remove e-mails, UUIDs e tokens JWT
-  antes de ir para o JSON público (`sanitize()` em `probe/checks/backend.mjs`).
-- URLs registradas têm a query string removida — é onde tokens costumam viajar.
-- **Nenhuma captura de tela da área autenticada** é gravada.
-- A `anon key` do Supabase está no código porque é pública por design: ela vai no
-  bundle do front-end e é protegida por RLS. A senha do usuário-monitor **nunca**
-  aparece no repositório — vive só em GitHub Secrets.
+- Nenhum dado de paciente, clínica ou usuário é publicado. As sondas gravam
+  **latência, código HTTP e contagem de linhas** — nunca o conteúdo delas.
+- **Texto de erro do console nunca é publicado.** Este repositório é público e
+  o histórico do git é permanente: uma vez commitado, não dá para desfazer.
+  O app loga telefone de paciente e erros do Postgres com valores de linha
+  embutidos, então a abordagem é *allowlist*: publica-se apenas uma **categoria
+  reconhecida + contagem + hash**, nada reversível.
+- URLs têm query string removida e segmentos que parecem id, hash ou nome de
+  arquivo viram placeholder — é onde moram UUID de paciente e nome de anexo.
+- **Nenhuma captura de tela** é gravada, nem da área pública.
+- As sondas de banco leem apenas tabelas estruturais (perfis, membros, clínicas,
+  tipos de consulta, status de agenda). **Nenhuma tabela de conversa, contato ou
+  lead é consultada.**
+- A `anon key` do Supabase está no código porque é pública por design: vai no
+  bundle do front-end e é protegida por RLS. A senha do usuário-monitor vive só
+  em GitHub Secrets.
+- O job que executa dependências de terceiros roda com `npm ci --ignore-scripts`,
+  **sem permissão de escrita** no repositório e com `persist-credentials: false`.
+  Quem grava o histórico é um job separado e mínimo.
+- **Não adicione gatilho `pull_request` a este workflow.** Ele daria a PRs de
+  terceiros um caminho para as credenciais de produção.
 
 ---
 
@@ -53,8 +113,10 @@ consome crédito de IA. É seguro rodar de hora em hora, para sempre.
 
 ### 2. Criar o usuário-monitor
 
-Crie no PrimeDoctor um usuário dedicado, com a **menor permissão possível** que ainda
-enxergue a tela inicial. Não use uma conta de pessoa real.
+Crie no PrimeDoctor um usuário dedicado. Ele precisa de permissão suficiente
+para **enxergar a própria linha em `profiles` e `clinic_members`** (senão a
+asserção de RLS acusa falso positivo), e não deve ter mais que isso.
+Não use uma conta de pessoa real.
 
 `Settings` → `Secrets and variables` → `Actions` → `New repository secret`:
 
@@ -63,19 +125,31 @@ enxergue a tela inicial. Não use uma conta de pessoa real.
 | `PD_MONITOR_EMAIL` | e-mail do usuário-monitor |
 | `PD_MONITOR_PASSWORD` | senha do usuário-monitor |
 
-Sem esses secrets o monitor continua funcionando: as checagens autenticadas ficam
-marcadas como *Não verificado*, em vez de falharem.
+Sem esses secrets o monitor continua rodando, mas as checagens autenticadas
+ficam como *Não verificado* — e o status geral **nunca** exibe "Todos os
+sistemas operacionais", porque metade das verificações não aconteceu.
 
-### 3. Domínio customizado (opcional, faça nesta ordem)
+### 3. Canal de alerta (faça isto — sem ele o monitor não acorda ninguém)
+
+| Secret | Para quê |
+|---|---|
+| `MONITOR_WEBHOOK_URL` | webhook de Slack, Discord ou Teams. Recebe a mensagem de alerta com link para a execução. |
+| `HEARTBEAT_URL` | URL de *dead-man's switch* ([healthchecks.io](https://healthchecks.io) tem plano grátis). O monitor pinga a cada execução; se o ping parar de chegar, o serviço avisa. **É a única coisa que detecta o monitor em si tendo morrido.** |
+
+O job de alerta dispara em três situações: falha confirmada no PrimeDoctor,
+falha ao publicar/persistir, e **falha do próprio job de verificação** — o caso
+que a maioria dos monitores esquece, porque um monitor quebrado fica quieto.
+
+### 4. Domínio customizado (opcional, nesta ordem)
 
 1. No DNS de `primedoctor.app`, crie um **CNAME**: `status` → `devhuander.github.io`
-2. Espere propagar (confira com `nslookup status.primedoctor.app`)
+2. Espere propagar (`nslookup status.primedoctor.app`)
 3. Só então crie a variável `PD_CUSTOM_DOMAIN` = `status.primedoctor.app`
    em `Settings` → `Secrets and variables` → `Actions` → aba **Variables**
 4. Rode o workflow de novo
 
-> **Ordem importa.** Se o arquivo `CNAME` for publicado antes do DNS existir, o
-> GitHub passa a redirecionar o endereço `.github.io` para um domínio que não
+> **A ordem importa.** Se o arquivo `CNAME` for publicado antes do DNS existir,
+> o GitHub passa a redirecionar o endereço `.github.io` para um domínio que não
 > resolve, e a página fica inacessível pelos dois caminhos. Por isso o domínio é
 > aplicado por variável, e não por arquivo comitado.
 
@@ -83,50 +157,52 @@ marcadas como *Não verificado*, em vez de falharem.
 
 | Variável | Padrão | Para quê |
 |---|---|---|
-| `PD_APP_URL` | `https://primedoctor.app` | apontar para outro ambiente (staging) |
+| `PD_APP_URL` | `https://primedoctor.app` | apontar para outro ambiente |
+| `PD_APP_ALT_URLS` | `https://primedoctor.primemedicalgo.com.br` | domínios alternativos, separados por vírgula (vazio desativa) |
 | `PD_SUPABASE_URL` | projeto de produção | apontar para outro projeto Supabase |
+| `PD_SUPABASE_ANON_KEY` | anon key de produção | **obrigatória** se mudar `PD_SUPABASE_URL` |
 | `PD_CUSTOM_DOMAIN` | *(vazio)* | domínio customizado do Pages |
 
 ---
 
-## Alertas
-
-O job `alertar` **falha de propósito** quando o status geral é `fail`. Isso faz o
-GitHub mandar o e-mail padrão de "workflow failed" para o dono do repositório —
-alerta grátis, sem configurar nada.
-
-Para desligar, remova o job `alertar` de `.github/workflows/monitor.yml`.
-Para alertar por WhatsApp, o próprio PrimeDoctor já tem a edge function
-`system-monitor`, que roda dentro do Supabase e usa as linhas Z-API da clínica.
-
----
-
-## Rodar localmente
+## Rodar e testar localmente
 
 ```bash
 npm install
 npx playwright install chromium
 
-# Verificação completa (precisa de rede até primedoctor.app e Supabase)
-npm run check
+npm run check         # verificação completa (precisa de rede até os alvos)
+npm run check:fast    # sem navegador, bem mais rápido
 
-# Sem navegador — bem mais rápido, útil para depurar as sondas HTTP
-npm run check:fast
+npm test              # testes de lógica + ponta a ponta contra um alvo simulado
+npm run test:page     # renderiza a página num DOM e verifica render e XSS
 
-# Ver a página com dados sintéticos, sem esperar histórico real
-npm run demo
-npm run preview          # http://localhost:4173
-
-# Arquivo único autocontido, abre com file:// e sem servidor
-node tools/gerar-preview-local.mjs
+npm run demo          # dados sintéticos para conferir o visual
+npm run preview       # http://localhost:4173
+node tools/gerar-preview-local.mjs   # arquivo único, abre com file://
 ```
 
-Para checar a área autenticada localmente, exporte as credenciais antes:
+Para checar a área autenticada localmente:
 
 ```bash
 export PD_MONITOR_EMAIL='...'
 export PD_MONITOR_PASSWORD='...'
 ```
+
+### Sobre os testes
+
+`npm test` sobe um **alvo simulado** que reproduz o comportamento real do
+Supabase — inclusive o gateway devolvendo 401 antes de rotear — e verifica que
+as sondas chegam ao veredito certo. Cada caso de teste corresponde a um defeito
+real encontrado em revisão. Os principais:
+
+- gateway devolvendo 401 para tudo **nunca** pode virar verde;
+- canário quebrado torna a seção de integrações não confiável;
+- função crítica removida do deploy é detectada; função não crítica não tinge a página;
+- RLS devolvendo zero linhas é falha, não sucesso;
+- Supabase fora do ar nomeia a causa raiz e suprime a cascata;
+- a primeira execução ruim não alarma; a segunda consecutiva sim;
+- e-mail e senha do monitor não aparecem no JSON publicado.
 
 ---
 
@@ -134,37 +210,40 @@ export PD_MONITOR_PASSWORD='...'
 
 ```
 probe/
-  run.mjs              orquestra tudo, monta status.json / history.json / incidents.json
-  config.mjs           alvos, limiares, lista de edge functions e tabelas
+  run.mjs              orquestra, decide o veredito, escreve data/
+  config.mjs           alvos, limiares, funções e tabelas monitoradas
   lib/http.mjs         fetch com timeout, DNS, TLS, identificação do host
+  lib/sanitize.mjs     allowlist de categorias de erro, mascaramento de URL
   checks/
-    frontend.mjs       hospedagem, TLS, HTML, bundles, assets, roteamento SPA
-    backend.mjs        Auth, PostgREST, Postgres, Realtime, Storage, login
-    edge.mjs           edge functions via preflight CORS
+    selftest.mjs       o monitor tem rede? roda antes de tudo
+    frontend.mjs       hospedagem, TLS, HTML, bundles, assets, domínios alternativos
+    backend.mjs        Auth, PostgREST, Postgres com asserção de RLS, Realtime, Storage
+    edge.mjs           edge functions via preflight autenticado + canário
     browser.mjs        Chromium: performance, componentes montados, console
     upstream.mjs       páginas de status de terceiros
-site/                  página estática (sem build): index.html, styles.css, app.js
+site/                  página estática, sem build
 data/                  relatórios gerados — comitados pelo próprio workflow
-tools/                 preview local e geração de dados de demonstração
+tools/                 testes, alvo simulado, preview local, dados de demonstração
 ```
 
-## Dados publicados
-
-| Arquivo | Conteúdo |
+| Arquivo publicado | Conteúdo |
 |---|---|
 | `data/status.json` | último relatório completo |
-| `data/history.json` | série compacta, ~90 dias de execuções horárias |
-| `data/incidents.json` | execuções não-OK consecutivas, agrupadas em incidentes |
+| `data/history.jsonl` | uma linha por execução, ~30 dias (append-only, para o git conseguir fazer delta) |
+| `data/incidents.json` | execuções ruins consecutivas, agrupadas em incidentes |
 
 ---
 
 ## Limites honestos
 
-- Verde significa que **o caminho verificado** respondeu — não que todos os fluxos
-  do produto estejam corretos.
-- A frequência é horária: uma queda curta entre dois ciclos pode não aparecer.
-  O cron do GitHub Actions também atrasa em horários de pico.
+- Verde significa que **o caminho verificado** respondeu. Não significa que
+  todos os fluxos do produto estejam corretos.
+- O preflight prova que a edge function existe e sobe, **não** que ela funciona.
+- A frequência é horária e o cron do GitHub atrasa em horários de pico: uma
+  queda curta entre dois ciclos pode não aparecer.
 - A verificação "ao vivo" da página usa a rede de quem está olhando e alcança
-  apenas endpoints com CORS aberto. O teste do site em si é `no-cors`: prova
-  DNS + TCP + TLS, mas não o código HTTP.
-- Sem os secrets configurados, metade do valor do monitor não roda.
+  apenas endpoints com CORS aberto. O teste do site em si é `no-cors` — prova
+  DNS, TCP e TLS, mas não o código HTTP. Por isso ele é exibido em cinza,
+  nunca em verde.
+- Sem `MONITOR_WEBHOOK_URL` e `HEARTBEAT_URL`, isto é um **painel de status**,
+  não um sistema de alerta.

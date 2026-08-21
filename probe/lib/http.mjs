@@ -21,7 +21,10 @@ export async function timedFetch(url, options = {}) {
     });
     let body = null;
     let bytes = 0;
-    if (options.readBody !== false) {
+    if (options.readBody === false) {
+      // Sem drenar nem cancelar, o undici segura o socket até o GC.
+      await res.body?.cancel().catch(() => {});
+    } else {
       const text = await res.text();
       bytes = Buffer.byteLength(text);
       body = options.maxBody === 0 ? null : text.slice(0, options.maxBody ?? 250_000);
@@ -31,6 +34,8 @@ export async function timedFetch(url, options = {}) {
       ok: res.ok,
       status: res.status,
       ms,
+      // Com readBody:false o tempo medido é só o TTFB, não o download completo.
+      measures: options.readBody === false ? 'ttfb' : 'total',
       bytes,
       body,
       headers: Object.fromEntries(res.headers.entries()),
@@ -44,11 +49,12 @@ export async function timedFetch(url, options = {}) {
       ok: false,
       status: 0,
       ms,
+      measures: 'erro',
       bytes: 0,
       body: null,
       headers: {},
       url,
-      error: aborted ? `timeout após ${timeout}ms` : describeError(err),
+      error: aborted ? `tempo esgotado após ${timeout}ms` : describeError(err),
     };
   } finally {
     clearTimeout(timer);
@@ -68,10 +74,11 @@ export function describeError(err) {
     CERT_HAS_EXPIRED: 'certificado TLS expirado',
     UNABLE_TO_VERIFY_LEAF_SIGNATURE: 'cadeia de certificados TLS inválida',
     DEPTH_ZERO_SELF_SIGNED_CERT: 'certificado TLS autoassinado',
+    ERR_TLS_CERT_ALTNAME_INVALID: 'certificado TLS não cobre este domínio',
   };
   if (code && map[code]) return map[code];
   const msg = cause?.message || err.message || String(err);
-  return code ? `${code}: ${msg}` : msg;
+  return code ? `${code}: ${msg}` : String(msg).slice(0, 200);
 }
 
 /** Tempo de resolução DNS + IPs. */
@@ -90,7 +97,14 @@ export async function resolveDns(hostname) {
   }
 }
 
-/** Dados do certificado TLS: emissor e dias até expirar. */
+/**
+ * Inspeciona o certificado TLS.
+ *
+ * `ok` é EXATAMENTE `socket.authorized`. A versão anterior aceitava
+ * "tem data de validade" como suficiente — o que aprovava certificado emitido
+ * para outro domínio, cadeia não confiável e MITM, enquanto todo navegador
+ * mostrava tela de interstício.
+ */
 export function inspectTls(hostname, port = 443) {
   return new Promise((resolve) => {
     const t0 = performance.now();
@@ -98,50 +112,106 @@ export function inspectTls(hostname, port = 443) {
     const done = (v) => {
       if (settled) return;
       settled = true;
+      clearTimeout(deadline);
       try { socket.destroy(); } catch { /* ignore */ }
-      resolve(v);
+      resolve({ ...v, ms: v.ms ?? Math.round(performance.now() - t0) });
     };
-    const socket = tls.connect(
-      { host: hostname, port, servername: hostname, timeout: 10000 },
-      () => {
-        const cert = socket.getPeerCertificate();
-        const validTo = cert?.valid_to ? new Date(cert.valid_to) : null;
-        const daysLeft = validTo ? Math.floor((validTo - Date.now()) / 86_400_000) : null;
-        done({
-          ok: socket.authorized || !!cert?.valid_to,
-          ms: Math.round(performance.now() - t0),
-          issuer: cert?.issuer?.O || cert?.issuer?.CN || null,
-          subject: cert?.subject?.CN || null,
-          validTo: validTo ? validTo.toISOString() : null,
-          daysLeft,
-          protocol: socket.getProtocol?.() || null,
-          error: socket.authorized ? null : socket.authorizationError ? String(socket.authorizationError) : null,
-        });
-      },
+
+    const deadline = setTimeout(
+      () => done({ ok: false, daysLeft: null, error: 'tempo esgotado no handshake TLS' }),
+      12000,
     );
-    socket.on('timeout', () => done({ ok: false, ms: 10000, daysLeft: null, error: 'timeout no handshake TLS' }));
-    socket.on('error', (err) =>
-      done({ ok: false, ms: Math.round(performance.now() - t0), daysLeft: null, error: describeError(err) }),
-    );
+
+    const socket = tls.connect({ host: hostname, port, servername: hostname, timeout: 12000 }, () => {
+      const cert = socket.getPeerCertificate();
+      const validTo = cert?.valid_to ? new Date(cert.valid_to) : null;
+      const daysLeft = validTo && !Number.isNaN(+validTo)
+        ? Math.floor((validTo - Date.now()) / 86_400_000)
+        : null;
+
+      // Confere também que o certificado cobre ESTE hostname.
+      let identityError = null;
+      try {
+        const r = tls.checkServerIdentity(hostname, cert);
+        if (r) identityError = 'certificado não cobre este domínio';
+      } catch { identityError = 'não foi possível validar a identidade do certificado'; }
+
+      const authorized = socket.authorized && !identityError;
+      done({
+        ok: authorized,
+        issuer: cert?.issuer?.O || cert?.issuer?.CN || null,
+        subject: cert?.subject?.CN || null,
+        validTo: validTo && !Number.isNaN(+validTo) ? validTo.toISOString() : null,
+        daysLeft,
+        protocol: socket.getProtocol?.() || null,
+        error: authorized
+          ? null
+          : identityError || String(socket.authorizationError || 'certificado não confiável'),
+      });
+    });
+
+    socket.on('timeout', () => done({ ok: false, daysLeft: null, error: 'conexão TLS ociosa (timeout)' }));
+    socket.on('error', (err) => done({ ok: false, daysLeft: null, error: describeError(err) }));
   });
+}
+
+/**
+ * Avalia o transporte de uma URL e devolve um item pronto.
+ *
+ * Regras deliberadas:
+ *  - https  → inspeciona o certificado de verdade;
+ *  - http em localhost → é teste local, não emite item;
+ *  - http em qualquer outro host → FALHA. Servir a aplicação sem HTTPS é um
+ *    problema de segurança, não um detalhe de configuração.
+ */
+export async function checkTransport({ url, key, label, thresholds }) {
+  const parsed = new URL(url);
+  const isLocal = /^(localhost|127\.0\.0\.1|\[::1\])$/i.test(parsed.hostname);
+
+  if (parsed.protocol !== 'https:') {
+    if (isLocal) return null;
+    return {
+      key, label,
+      status: 'fail',
+      latencyMs: null,
+      detail: 'o endereço está configurado em HTTP, sem TLS — tráfego trafega em texto claro',
+      meta: {},
+    };
+  }
+
+  const res = await inspectTls(parsed.hostname, parsed.port ? Number(parsed.port) : 443);
+  let status = 'ok';
+  if (!res.ok) status = 'fail';
+  else if (res.daysLeft != null && res.daysLeft <= thresholds.tlsExpiryFailDays) status = 'fail';
+  else if (res.daysLeft != null && res.daysLeft <= thresholds.tlsExpiryWarnDays) status = 'degraded';
+
+  return {
+    key, label, status,
+    latencyMs: res.ms,
+    detail: res.ok
+      ? `válido · expira em ${res.daysLeft} dia(s) · ${res.issuer || 'emissor desconhecido'}`
+      : res.error,
+    meta: { daysLeft: res.daysLeft, issuer: res.issuer, protocol: res.protocol, validTo: res.validTo },
+  };
 }
 
 /** Identifica quem está servindo, a partir dos headers de resposta. */
 export function identifyHost(headers = {}) {
   const h = {};
   for (const [k, v] of Object.entries(headers)) h[k.toLowerCase()] = v;
+  const server = (h['server'] || '').toLowerCase();
   const signals = [];
-  if (h['cf-ray'] || (h['server'] || '').toLowerCase().includes('cloudflare')) signals.push('Cloudflare');
-  if (h['x-vercel-id'] || (h['server'] || '').toLowerCase() === 'vercel') signals.push('Vercel');
-  if (h['fly-request-id'] || (h['server'] || '').toLowerCase().startsWith('fly')) signals.push('Fly.io');
-  if (h['x-served-by'] || h['x-cache']) signals.push('CDN com cache');
+  if (h['cf-ray'] || server.includes('cloudflare')) signals.push('Cloudflare');
+  if (h['x-vercel-id'] || server === 'vercel') signals.push('Vercel');
+  if (h['fly-request-id'] || server.startsWith('fly')) signals.push('Fly.io');
   if (Object.keys(h).some((k) => k.startsWith('x-lovable'))) signals.push('Lovable');
-  if ((h['server'] || '').toLowerCase().includes('netlify') || h['x-nf-request-id']) signals.push('Netlify');
+  if (server.includes('netlify') || h['x-nf-request-id']) signals.push('Netlify');
+  if (!signals.length && (h['x-served-by'] || h['x-cache'])) signals.push('CDN com cache');
   return {
     server: h['server'] || null,
     via: h['via'] || null,
     cfRay: h['cf-ray'] || null,
     cacheStatus: h['cf-cache-status'] || h['x-cache'] || null,
-    detected: signals.length ? [...new Set(signals)] : ['não identificado'],
+    detected: signals.length ? [...new Set(signals)] : ['host não identificado'],
   };
 }

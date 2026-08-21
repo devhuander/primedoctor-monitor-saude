@@ -1,94 +1,135 @@
 import { chromium } from 'playwright';
 import { CONFIG, STATUS, worstStatus, statusFromLatency } from '../config.mjs';
-import { sanitize } from './backend.mjs';
+import { scrub, summarizeErrors, safeUrl } from '../lib/sanitize.mjs';
 
 const T = CONFIG.thresholds;
 
-// Ruído conhecido que não indica problema de saúde do sistema.
+// Ruído conhecido que não diz nada sobre a saúde do sistema.
 const IGNORED_CONSOLE = [
   /Download the React DevTools/i,
   /\[vite\]/i,
   /Lit is in dev mode/i,
   /third-party cookie/i,
   /Tracking Prevention/i,
+  /ResizeObserver loop/i,
+  /chrome-extension:/i,
+  /favicon/i,
 ];
 
 /**
- * Carrega o app num Chromium real e mede o que o usuário de verdade sente:
- * tempo até a tela aparecer, se os componentes montaram, erros no console
- * e requisições que falharam.
+ * Carrega o app num Chromium real e mede o que o usuário de verdade sente.
+ *
+ * Duas decisões deliberadas:
+ *
+ * 1. ERRO DE JAVASCRIPT NÃO DERRUBA O STATUS. O app tem centenas de
+ *    `console.error` legítimos e SPAs disparam exceções benignas o tempo todo
+ *    (fetch abortado em unmount, SDK de terceiro). Tratar isso como falha
+ *    garante vermelho permanente — e uma página vermelha permanente é uma
+ *    página que ninguém abre. Os erros são reportados como INFORMATIVOS.
+ *
+ * 2. SELETOR NÃO ENCONTRADO ≠ SISTEMA QUEBRADO. Se o formulário de login mudou
+ *    de id, a sonda está desatualizada, não a produção. Esse caso vira
+ *    "indeterminado", com texto dizendo para corrigir a sonda.
  */
 export async function checkBrowser(session) {
   let browser;
-  const sections = [];
   try {
     browser = await chromium.launch({ args: ['--no-sandbox', '--disable-dev-shm-usage'] });
   } catch (err) {
-    return {
-      key: 'experience',
-      label: 'Experiência de carregamento',
-      status: STATUS.UNKNOWN,
-      latencyMs: null,
-      items: [],
-      detail: `não foi possível iniciar o navegador: ${err.message}`,
-      meta: {},
-    };
+    return unknownSection(`não foi possível iniciar o navegador: ${scrub(err.message)}`);
   }
 
+  const sections = [];
   try {
     // ---------- 1. Tela pública de login ----------
     const publicRun = await measurePage(browser, CONFIG.app.baseUrl + CONFIG.app.publicRoute, {
       expect: async (page) => {
         const email = await page.locator('#signin-email, input[type="email"]').first().count();
         const pass = await page.locator('#signin-password, input[type="password"]').first().count();
-        return {
-          ok: email > 0 && pass > 0,
-          detail: email > 0 && pass > 0 ? 'formulário de acesso renderizado' : 'formulário de acesso NÃO renderizou',
-        };
+        if (email > 0 && pass > 0) return { ok: true, detail: 'formulário de acesso renderizado' };
+        // Distingue "app não montou" de "app montou mas mudou de layout".
+        const mounted = await page.evaluate(() => (document.querySelector('#root')?.textContent || '').trim().length);
+        return mounted > 80
+          ? { unknown: true, detail: 'o app montou, mas o formulário esperado não foi encontrado — sonda possivelmente desatualizada' }
+          : { ok: false, detail: 'o app não renderizou o formulário de acesso' };
       },
     });
-    sections.push(...buildItems('public', 'Tela de acesso (pública)', publicRun));
+    sections.push(...buildItems('public', 'Tela de acesso', publicRun, { includeTiming: true }));
 
-    // ---------- 2. Área autenticada ----------
-    if (!CONFIG.auth.email || !CONFIG.auth.password) {
+    // ---------- 2. Login e área interna ----------
+    if (session?.skipped) {
       sections.push({
-        key: 'authed',
-        label: 'Área autenticada',
+        key: 'authed.flow',
+        label: 'Login e área interna',
         status: STATUS.SKIPPED,
         latencyMs: null,
-        detail: 'usuário-monitor não configurado — checagem interna desativada',
+        detail: 'usuário-monitor não configurado — o fluxo interno não foi verificado',
+        meta: {},
+      });
+    } else if (session?.monitorFault) {
+      sections.push({
+        key: 'authed.flow',
+        label: 'Login e área interna',
+        status: STATUS.UNKNOWN,
+        monitorFault: true,
+        latencyMs: null,
+        detail: `credencial do monitor recusada (${scrub(session.reason)}) — corrija os secrets; isto não indica falha do produto`,
         meta: {},
       });
     } else if (!session?.ok) {
       sections.push({
-        key: 'authed',
-        label: 'Área autenticada',
+        key: 'authed.flow',
+        label: 'Login e área interna',
         status: STATUS.FAIL,
         latencyMs: null,
-        detail: `login falhou na API: ${sanitize(session?.reason) || 'motivo desconhecido'}`,
+        detail: `o serviço de autenticação recusou o login: ${scrub(session?.reason) || 'motivo desconhecido'}`,
         meta: {},
       });
     } else {
       const authedRun = await measureLogin(browser);
-      sections.push(...buildItems('authed', 'Área autenticada', authedRun));
+      sections.push(...buildItems('authed', 'Login e área interna', authedRun, { includeTiming: false }));
     }
+  } catch (err) {
+    sections.push({
+      key: 'browser.error',
+      label: 'Verificação com navegador',
+      status: STATUS.UNKNOWN,
+      latencyMs: null,
+      detail: `a sonda de navegador falhou: ${scrub(err.message)}`,
+      meta: {},
+    });
   } finally {
     await browser.close().catch(() => {});
   }
 
+  // Itens informativos (erros de console) não entram no cálculo do status.
+  const graded = sections.filter((s) => !s.informational);
   const load = sections.find((s) => s.key === 'public.load');
+
   return {
     key: 'experience',
     label: 'Experiência de carregamento',
-    status: worstStatus(sections.map((s) => s.status)),
+    status: worstStatus(graded.map((s) => s.status)),
     latencyMs: load?.latencyMs ?? null,
     items: sections,
     meta: {},
   };
 }
 
+function unknownSection(detail) {
+  return {
+    key: 'experience',
+    label: 'Experiência de carregamento',
+    status: STATUS.UNKNOWN,
+    latencyMs: null,
+    items: [],
+    detail,
+    meta: {},
+  };
+}
+
 /** Abre uma página, coleta métricas de performance, console e rede. */
-async function measurePage(browser, url, { expect, prepare } = {}) {
+async function measurePage(browser, url, { expect } = {}) {
   const context = await browser.newContext({
     viewport: { width: 1366, height: 900 },
     userAgent:
@@ -102,45 +143,44 @@ async function measurePage(browser, url, { expect, prepare } = {}) {
   const pageErrors = [];
   const failedRequests = [];
   const resources = [];
+  const origin = new URL(url).origin;
 
   page.on('console', (msg) => {
-    if (msg.type() !== 'error' && msg.type() !== 'warning') return;
+    if (msg.type() !== 'error') return;
     const text = msg.text();
     if (IGNORED_CONSOLE.some((re) => re.test(text))) return;
-    if (msg.type() === 'error') consoleErrors.push(sanitize(text));
+    consoleErrors.push(text);
   });
-  page.on('pageerror', (err) => pageErrors.push(sanitize(err.message)));
+  page.on('pageerror', (err) => {
+    if (IGNORED_CONSOLE.some((re) => re.test(err.message))) return;
+    pageErrors.push(err.message);
+  });
   page.on('requestfailed', (req) => {
-    failedRequests.push({ url: shortUrl(req.url()), reason: req.failure()?.errorText || 'falhou' });
+    failedRequests.push({
+      url: safeUrl(req.url()),
+      type: req.resourceType(),
+      reason: scrub(req.failure()?.errorText) || 'falhou',
+      sameOrigin: req.url().startsWith(origin),
+    });
   });
   page.on('response', (res) => {
     const u = res.url();
-    if (res.status() >= 400 && !u.startsWith('data:')) {
-      failedRequests.push({ url: shortUrl(u), reason: `HTTP ${res.status()}` });
-    }
     const type = res.request().resourceType();
+    if (res.status() >= 400 && !u.startsWith('data:')) {
+      failedRequests.push({ url: safeUrl(u), type, reason: `HTTP ${res.status()}`, sameOrigin: u.startsWith(origin) });
+    }
     if (type === 'script' || type === 'stylesheet') {
-      resources.push({ url: shortUrl(u), type, status: res.status() });
+      resources.push({ url: safeUrl(u), type, status: res.status() });
     }
   });
 
   const result = {
-    url,
-    navOk: false,
-    navError: null,
-    timings: {},
-    webVitals: {},
-    consoleErrors,
-    pageErrors,
-    failedRequests,
-    resources,
-    expectation: null,
-    domNodes: 0,
+    url, navOk: false, navError: null, httpStatus: 0,
+    timings: {}, webVitals: {}, consoleErrors, pageErrors, failedRequests, resources,
+    expectation: null, domNodes: 0, timeToAppMs: null,
   };
 
   try {
-    if (prepare) await prepare(page, context);
-
     await page.addInitScript(() => {
       window.__pdVitals = { lcp: null, cls: 0, fcp: null };
       try {
@@ -149,44 +189,42 @@ async function measurePage(browser, url, { expect, prepare } = {}) {
           if (e.length) window.__pdVitals.lcp = Math.round(e[e.length - 1].startTime);
         }).observe({ type: 'largest-contentful-paint', buffered: true });
         new PerformanceObserver((l) => {
-          for (const entry of l.getEntries()) {
-            if (!entry.hadRecentInput) window.__pdVitals.cls += entry.value;
-          }
+          for (const entry of l.getEntries()) if (!entry.hadRecentInput) window.__pdVitals.cls += entry.value;
         }).observe({ type: 'layout-shift', buffered: true });
         new PerformanceObserver((l) => {
           for (const entry of l.getEntries()) {
             if (entry.name === 'first-contentful-paint') window.__pdVitals.fcp = Math.round(entry.startTime);
           }
         }).observe({ type: 'paint', buffered: true });
-      } catch (e) { /* navegador sem suporte */ }
+      } catch { /* navegador sem suporte */ }
     });
 
     const t0 = Date.now();
-    const response = await page.goto(url, { waitUntil: 'load', timeout: CONFIG.timeouts.browser });
+    const response = await page.goto(url, { waitUntil: 'domcontentloaded', timeout: CONFIG.timeouts.browser });
     result.httpStatus = response?.status() ?? 0;
     result.navOk = !!response && response.status() < 400;
 
-    // Espera o app efetivamente montar (React pinta depois do "load").
-    await page
-      .waitForFunction(() => document.querySelector('#root')?.childElementCount > 0, null, { timeout: 25000 })
-      .catch(() => {});
-    result.timeToAppMs = Date.now() - t0;
+    // O que importa não é o evento "load" (que espera fonte e analytics),
+    // e sim o app estar montado e com conteúdo na tela.
+    const mounted = await page
+      .waitForFunction(() => (document.querySelector('#root')?.textContent || '').trim().length > 40, null, { timeout: 25000 })
+      .then(() => true)
+      .catch(() => false);
+    result.timeToAppMs = mounted ? Date.now() - t0 : null;
+    result.mounted = mounted;
 
-    // Deixa o LCP estabilizar.
-    await page.waitForTimeout(1200);
+    await page.waitForTimeout(1200); // deixa o LCP estabilizar
 
     result.timings = await page.evaluate(() => {
       const n = performance.getEntriesByType('navigation')[0];
       if (!n) return {};
-      const r = (v) => (v == null ? null : Math.round(v));
+      const r = (v) => (v == null || Number.isNaN(v) ? null : Math.round(v));
       return {
         dnsMs: r(n.domainLookupEnd - n.domainLookupStart),
         tcpMs: r(n.connectEnd - n.connectStart),
-        tlsMs: n.secureConnectionStart ? r(n.connectEnd - n.secureConnectionStart) : null,
         ttfbMs: r(n.responseStart - n.requestStart),
         downloadMs: r(n.responseEnd - n.responseStart),
         domContentLoadedMs: r(n.domContentLoadedEventEnd - n.startTime),
-        loadMs: r(n.loadEventEnd - n.startTime),
         transferBytes: n.transferSize || 0,
       };
     });
@@ -199,9 +237,11 @@ async function measurePage(browser, url, { expect, prepare } = {}) {
 
     result.domNodes = await page.evaluate(() => document.querySelectorAll('*').length);
 
-    if (expect) result.expectation = await expect(page).catch((e) => ({ ok: false, detail: sanitize(e.message) }));
+    if (expect) {
+      result.expectation = await expect(page).catch((e) => ({ unknown: true, detail: `a asserção falhou: ${scrub(e.message)}` }));
+    }
   } catch (err) {
-    result.navError = sanitize(err.message);
+    result.navError = scrub(err.message);
   } finally {
     await context.close().catch(() => {});
   }
@@ -213,146 +253,157 @@ async function measurePage(browser, url, { expect, prepare } = {}) {
 async function measureLogin(browser) {
   return measurePage(browser, CONFIG.app.baseUrl + CONFIG.app.publicRoute, {
     expect: async (page) => {
-      const t0 = Date.now();
-      await page.fill('#signin-email, input[type="email"]', CONFIG.auth.email);
-      await page.fill('#signin-password, input[type="password"]', CONFIG.auth.password);
-      await page.click('form button[type="submit"]');
+      const emailField = page.locator('#signin-email, input[type="email"]').first();
+      const passField = page.locator('#signin-password, input[type="password"]').first();
+      const submit = page.locator('form button[type="submit"]').first();
 
-      // Sucesso = saiu da tela de login (o formulário some).
+      if ((await emailField.count()) === 0 || (await passField.count()) === 0 || (await submit.count()) === 0) {
+        return { unknown: true, detail: 'formulário de login não encontrado — sonda desatualizada, não falha do produto' };
+      }
+
+      const t0 = Date.now();
+      await emailField.fill(CONFIG.auth.email);
+      await passField.fill(CONFIG.auth.password);
+      await submit.click();
+
       const left = await page
-        .waitForFunction(() => !document.querySelector('#signin-password'), null, { timeout: 40000 })
+        .waitForFunction(() => !document.querySelector('#signin-password'), null, { timeout: 35000 })
         .then(() => true)
         .catch(() => false);
 
       if (!left) {
-        const msg = await page
-          .locator('.text-destructive')
-          .first()
-          .textContent()
-          .catch(() => null);
-        return { ok: false, detail: `login não concluiu${msg ? `: ${sanitize(msg.trim())}` : ' em 40s'}`, ms: Date.now() - t0 };
+        const msg = await page.locator('.text-destructive').first().textContent().catch(() => null);
+        return { ok: false, ms: Date.now() - t0, detail: `login não concluiu${msg ? `: ${scrub(msg)}` : ' em 35s'}` };
       }
 
-      // Confere que a aplicação interna renderizou conteúdo de verdade.
       const mounted = await page
-        .waitForFunction(() => (document.querySelector('#root')?.textContent || '').trim().length > 120, null, {
-          timeout: 30000,
-        })
+        .waitForFunction(() => (document.querySelector('#root')?.textContent || '').trim().length > 150, null, { timeout: 30000 })
         .then(() => true)
         .catch(() => false);
 
+      const ms = Date.now() - t0;
       return {
         ok: mounted,
-        ms: Date.now() - t0,
+        ms,
         detail: mounted
-          ? `login e carregamento da área interna em ${((Date.now() - t0) / 1000).toFixed(1)}s`
-          : 'login OK mas a área interna ficou em branco',
+          ? `login e carregamento da área interna em ${(ms / 1000).toFixed(1)}s`
+          : 'login aceito, mas a área interna ficou em branco',
       };
     },
   });
 }
 
 /** Converte uma medição bruta em itens de status legíveis. */
-function buildItems(prefix, label, run) {
+function buildItems(prefix, label, run, { includeTiming }) {
   const items = [];
   const vitals = run.webVitals || {};
   const timings = run.timings || {};
 
-  // Carregamento
-  const loadMs = run.timeToAppMs ?? timings.loadMs ?? null;
-  let loadStatus;
-  let loadDetail;
-  if (run.navError) {
-    loadStatus = STATUS.FAIL;
-    loadDetail = `não carregou: ${run.navError}`;
-  } else if (!run.navOk) {
-    loadStatus = STATUS.FAIL;
-    loadDetail = `servidor respondeu HTTP ${run.httpStatus}`;
-  } else {
-    loadStatus = statusFromLatency(loadMs ?? 0, T.pageLoadWarn, T.pageLoadFail);
-    loadDetail = `app pronto em ${fmtSec(loadMs)}${timings.ttfbMs != null ? ` · TTFB ${timings.ttfbMs}ms` : ''}`;
-  }
-  items.push({
-    key: `${prefix}.load`,
-    label: `${label} — tempo de carregamento`,
-    status: loadStatus,
-    latencyMs: loadMs,
-    detail: loadDetail,
-    meta: { ...timings, ...vitals, domNodes: run.domNodes },
-  });
-
-  // Percepção visual (LCP)
-  if (vitals.lcpMs != null) {
+  if (includeTiming) {
+    const loadMs = run.timeToAppMs;
+    let status;
+    let detail;
+    if (run.navError) {
+      status = STATUS.FAIL;
+      detail = `não carregou: ${run.navError}`;
+    } else if (!run.navOk) {
+      status = STATUS.FAIL;
+      detail = `o servidor respondeu HTTP ${run.httpStatus}`;
+    } else if (!run.mounted) {
+      status = STATUS.FAIL;
+      detail = 'a página carregou mas o app não montou nada na tela em 25s';
+    } else {
+      status = statusFromLatency(loadMs, T.pageLoadWarn, T.pageLoadFail);
+      detail = `app pronto em ${fmtSec(loadMs)}${timings.ttfbMs != null ? ` · TTFB ${timings.ttfbMs}ms` : ''}`;
+    }
     items.push({
-      key: `${prefix}.lcp`,
-      label: `${label} — primeira tela visível`,
-      status: statusFromLatency(vitals.lcpMs, T.lcpWarn, T.lcpFail),
-      latencyMs: vitals.lcpMs,
-      detail: `maior elemento pintado em ${fmtSec(vitals.lcpMs)}${
-        vitals.fcpMs != null ? ` · primeiro conteúdo em ${fmtSec(vitals.fcpMs)}` : ''
-      }`,
-      meta: { cls: vitals.cls },
+      key: `${prefix}.load`,
+      label: `${label} — tempo até o app aparecer`,
+      status,
+      latencyMs: loadMs,
+      detail,
+      meta: { ...timings, ...vitals, domNodes: run.domNodes },
     });
+
+    if (vitals.lcpMs != null) {
+      items.push({
+        key: `${prefix}.lcp`,
+        label: `${label} — primeira tela visível`,
+        status: statusFromLatency(vitals.lcpMs, T.lcpWarn, T.lcpFail),
+        latencyMs: vitals.lcpMs,
+        detail: `maior elemento pintado em ${fmtSec(vitals.lcpMs)}${vitals.fcpMs != null ? ` · primeiro conteúdo em ${fmtSec(vitals.fcpMs)}` : ''}`,
+        meta: { cls: vitals.cls },
+      });
+    }
   }
 
-  // Componentes montados
+  // Asserção funcional (formulário renderizado / login concluído).
   if (run.expectation) {
+    const e = run.expectation;
     items.push({
       key: `${prefix}.components`,
       label: `${label} — componentes montados`,
-      status: run.expectation.ok ? STATUS.OK : STATUS.FAIL,
-      latencyMs: run.expectation.ms ?? null,
-      detail: run.expectation.detail,
+      status: e.unknown ? STATUS.UNKNOWN : e.ok ? STATUS.OK : STATUS.FAIL,
+      latencyMs: e.ms ?? null,
+      detail: e.detail,
+      meta: {},
+    });
+  } else if (run.navError) {
+    items.push({
+      key: `${prefix}.components`,
+      label: `${label} — componentes montados`,
+      status: STATUS.FAIL,
+      latencyMs: null,
+      detail: `não foi possível avaliar: ${run.navError}`,
       meta: {},
     });
   }
 
-  // Erros de JavaScript
-  const errs = [...new Set([...(run.pageErrors || []), ...(run.consoleErrors || [])])];
+  // ERROS DE JAVASCRIPT — informativo, nunca define o status geral.
+  // Publicamos apenas categoria + contagem: o texto integral pode conter
+  // telefone de paciente e este repositório é público e permanente.
+  const allErrors = [...run.pageErrors, ...run.consoleErrors];
+  const categories = summarizeErrors(allErrors);
   items.push({
     key: `${prefix}.errors`,
     label: `${label} — erros de JavaScript`,
-    status: run.pageErrors?.length ? STATUS.FAIL : errs.length ? STATUS.DEGRADED : STATUS.OK,
+    informational: true,
+    status: allErrors.length === 0 ? STATUS.OK : STATUS.DEGRADED,
     latencyMs: null,
-    detail: errs.length ? `${errs.length} erro(s) no console` : 'nenhum erro no console',
-    meta: { samples: errs.slice(0, 5) },
+    detail: allErrors.length === 0
+      ? 'nenhum erro no console'
+      : `${allErrors.length} erro(s) em ${categories.length} categoria(s) — informativo, não afeta o status geral`,
+    meta: { categories, total: allErrors.length },
   });
 
-  // Recursos que falharam
-  const failed = dedupeRequests(run.failedRequests || []);
-  const scripts = (run.resources || []).filter((r) => r.type === 'script');
+  // Recursos: julga por criticidade, não por contagem bruta.
+  const failed = dedupe(run.failedRequests);
+  const critical = failed.filter((f) => ['document', 'script', 'stylesheet'].includes(f.type));
+  const apiFailures = failed.filter((f) => f.type === 'fetch' || f.type === 'xhr');
+  const scripts = run.resources.filter((r) => r.type === 'script');
   items.push({
     key: `${prefix}.resources`,
     label: `${label} — recursos carregados`,
-    status: failed.length === 0 ? STATUS.OK : failed.length <= 2 ? STATUS.DEGRADED : STATUS.FAIL,
+    status: critical.length > 0 ? STATUS.FAIL : apiFailures.length > 2 ? STATUS.DEGRADED : STATUS.OK,
     latencyMs: null,
-    detail:
-      failed.length === 0
-        ? `${scripts.length} script(s) carregados, nenhuma requisição falhou`
-        : `${failed.length} requisição(ões) falharam`,
+    detail: critical.length > 0
+      ? `${critical.length} recurso(s) essenciais não carregaram (script/estilo/documento)`
+      : apiFailures.length > 0
+        ? `${scripts.length} script(s) OK · ${apiFailures.length} chamada(s) de API falharam`
+        : `${scripts.length} script(s) carregados, nada essencial falhou`,
     meta: { failed: failed.slice(0, 8), scriptCount: scripts.length },
   });
 
   return items;
 }
 
-function dedupeRequests(list) {
+function dedupe(list) {
   const seen = new Map();
   for (const f of list) {
     const k = `${f.url}|${f.reason}`;
     if (!seen.has(k)) seen.set(k, f);
   }
   return [...seen.values()];
-}
-
-function shortUrl(u) {
-  try {
-    const parsed = new URL(u);
-    // Remove query string: pode conter tokens.
-    return parsed.origin + parsed.pathname;
-  } catch {
-    return String(u).split('?')[0].slice(0, 160);
-  }
 }
 
 function fmtSec(ms) {

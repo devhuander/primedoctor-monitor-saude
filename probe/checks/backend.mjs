@@ -1,14 +1,15 @@
 import WebSocket from 'ws';
 import { CONFIG, STATUS, worstStatus, statusFromLatency } from '../config.mjs';
-import { timedFetch, describeError } from '../lib/http.mjs';
+import { timedFetch, describeError, checkTransport } from '../lib/http.mjs';
+import { scrub } from '../lib/sanitize.mjs';
 
 const T = CONFIG.thresholds;
 
 /**
- * Saúde do backend: Auth, PostgREST, Postgres (via consultas reais),
- * Realtime, Storage e o healthcheck próprio do PrimeDoctor.
+ * Saúde do backend: TLS, Auth, PostgREST, Postgres (via consultas reais com
+ * asserção de linhas), Realtime e Storage.
  *
- * Nunca gravamos conteúdo de linhas — apenas latência, sucesso e código de erro.
+ * Nunca gravamos conteúdo de linhas — apenas latência, contagem e sucesso/erro.
  */
 export async function checkBackend(session) {
   const { url, anonKey } = CONFIG.supabase;
@@ -17,8 +18,14 @@ export async function checkBackend(session) {
   const bearer = authed ? session.accessToken : anonKey;
   const baseHeaders = { apikey: anonKey, Authorization: `Bearer ${bearer}` };
 
+  // --- TLS do próprio Supabase (o front-end não é o único endpoint que importa) ---
+  const supaTls = await checkTransport({
+    url, key: 'supabase-tls', label: 'Certificado TLS do Supabase', thresholds: T,
+  });
+  if (supaTls) items.push(supaTls);
+
   // --- GoTrue (autenticação) ---
-  const auth = await timedFetch(`${url}/auth/v1/health`, { headers: { apikey: anonKey } });
+  const auth = await timedFetch(`${url}/auth/v1/health`, { headers: { apikey: anonKey }, maxBody: 1000 });
   let authVersion = null;
   try { authVersion = JSON.parse(auth.body || '{}').version || null; } catch { /* ignore */ }
   items.push({
@@ -30,8 +37,8 @@ export async function checkBackend(session) {
     meta: { version: authVersion },
   });
 
-  // --- PostgREST (camada de API do banco) ---
-  const rest = await timedFetch(`${url}/rest/v1/`, { headers: baseHeaders, maxBody: 0 });
+  // --- PostgREST ---
+  const rest = await timedFetch(`${url}/rest/v1/`, { headers: baseHeaders, readBody: false });
   items.push({
     key: 'postgrest',
     label: 'API do banco (PostgREST)',
@@ -41,9 +48,10 @@ export async function checkBackend(session) {
     meta: {},
   });
 
-  // --- Healthcheck oficial do PrimeDoctor (bate no Postgres com service role) ---
+  // --- Healthcheck oficial do PrimeDoctor (consulta com service role) ---
   const health = await timedFetch(`${url}/functions/v1/system-health`, {
     headers: { apikey: anonKey, Authorization: `Bearer ${anonKey}` },
+    maxBody: 2000,
   });
   let healthJson = {};
   try { healthJson = JSON.parse(health.body || '{}'); } catch { /* ignore */ }
@@ -51,81 +59,32 @@ export async function checkBackend(session) {
   items.push({
     key: 'system-health',
     label: 'Healthcheck do PrimeDoctor (banco)',
-    status: health.ok && dbOk ? statusFromLatency(health.ms, T.dbWarn, T.dbFail) : STATUS.FAIL,
+    status: health.ok && dbOk ? statusFromLatency(health.ms, T.dbWarn, T.dbFail) : health.status === 0 ? STATUS.UNKNOWN : STATUS.FAIL,
     latencyMs: health.ms,
     detail: health.ok
       ? dbOk
         ? `banco respondendo em ${healthJson.latency_ms ?? '?'}ms`
-        : `banco com falha: ${sanitize(healthJson.db_error) || 'sem detalhe'}`
+        : `banco com falha: ${scrub(healthJson.db_error) || 'sem detalhe'}`
       : health.error || `HTTP ${health.status}`,
     meta: { dbLatencyMs: healthJson.latency_ms ?? null },
   });
 
-  // --- Consultas reais em tabelas (prova o caminho completo: rede → PostgREST → Postgres → RLS) ---
-  const dbResults = [];
-  for (const probe of CONFIG.dbProbes) {
-    if (probe.authOnly && !authed) {
-      dbResults.push({ table: probe.table, label: probe.label, status: STATUS.SKIPPED, ms: null, detail: 'requer sessão' });
-      continue;
-    }
-    const r = await timedFetch(`${url}/rest/v1/${probe.table}?select=id&limit=1`, {
-      headers: { ...baseHeaders, Prefer: 'count=none' },
-      maxBody: 400,
-    });
-    // 200 = leu; 206 = parcial. 401/403 com sessão válida indica RLS bloqueando (degradado, não queda).
-    let status;
-    let detail;
-    if (r.ok) {
-      status = statusFromLatency(r.ms, T.dbWarn, T.dbFail);
-      detail = `consulta OK em ${r.ms}ms`;
-    } else if (r.status === 401 || r.status === 403) {
-      status = STATUS.DEGRADED;
-      detail = `acesso negado pela RLS (HTTP ${r.status}) — verifique as permissões do usuário-monitor`;
-    } else if (r.status === 404) {
-      status = STATUS.FAIL;
-      detail = 'tabela não encontrada (schema divergente do esperado)';
-    } else {
-      status = STATUS.FAIL;
-      detail = r.error || `HTTP ${r.status}`;
-    }
-    dbResults.push({ table: probe.table, label: probe.label, status, ms: r.ms, detail });
-  }
-  const dbLatencies = dbResults.filter((d) => d.ms != null).map((d) => d.ms);
-  items.push({
-    key: 'database',
-    label: 'Consultas ao banco de dados',
-    status: worstStatus(dbResults.map((d) => d.status)),
-    latencyMs: dbLatencies.length ? Math.round(median(dbLatencies)) : null,
-    detail: summarize(dbResults),
-    meta: { probes: dbResults },
-  });
+  // --- Consultas reais + asserção de RLS ---
+  items.push(await checkDatabase(url, baseHeaders, authed, session));
 
-  // --- Realtime (websocket) ---
+  // --- Realtime ---
   const realtime = await checkRealtime(url, anonKey);
   items.push({
     key: 'realtime',
     label: 'Realtime (tempo real)',
-    status: realtime.ok ? statusFromLatency(realtime.ms, 2000, 8000) : STATUS.FAIL,
+    status: realtime.ok ? statusFromLatency(realtime.ms, 2500, 8000) : STATUS.FAIL,
     latencyMs: realtime.ms,
     detail: realtime.ok ? 'websocket conectado' : realtime.error,
     meta: {},
   });
 
   // --- Storage ---
-  const storagePath = authed ? `${url}/storage/v1/bucket` : `${url}/storage/v1/object/public/__monitor_probe__`;
-  const storage = await timedFetch(storagePath, { headers: baseHeaders, maxBody: 0 });
-  // Sem sessão, esperamos 400/404 do objeto inexistente — o que já prova que o serviço responde.
-  const storageAlive = authed ? storage.ok : storage.status > 0 && storage.status < 500;
-  items.push({
-    key: 'storage',
-    label: 'Armazenamento de arquivos',
-    status: storageAlive ? statusFromLatency(storage.ms, T.dbWarn, T.dbFail) : STATUS.FAIL,
-    latencyMs: storage.ms,
-    detail: storageAlive
-      ? authed ? 'serviço respondendo e acessível' : 'serviço respondendo'
-      : storage.error || `HTTP ${storage.status}`,
-    meta: {},
-  });
+  items.push(await checkStorage(url, baseHeaders, authed));
 
   return {
     key: 'backend',
@@ -137,7 +96,123 @@ export async function checkBackend(session) {
   };
 }
 
-/** Autentica o usuário-monitor. Devolve sessão ou motivo da falha. */
+/**
+ * HTTP 200 com lista vazia é o sintoma clássico de policy de RLS quebrada por
+ * migration: todo usuário vê telas em branco e o monitor ingênuo fica verde.
+ * Por isso as sondas marcadas com `expectRows` exigem pelo menos uma linha —
+ * o usuário-monitor tem obrigatoriamente que enxergar a própria linha.
+ */
+async function checkDatabase(url, baseHeaders, authed, session) {
+  const results = [];
+
+  for (const probe of CONFIG.dbProbes) {
+    if (probe.authOnly && !authed) {
+      results.push({
+        table: probe.table, label: probe.label, status: STATUS.SKIPPED, ms: null, rows: null,
+        detail: session?.skipped ? 'sem usuário-monitor configurado' : 'sem sessão válida',
+      });
+      continue;
+    }
+
+    const r = await timedFetch(`${url}/rest/v1/${probe.table}?select=id&limit=1`, {
+      headers: { ...baseHeaders, Prefer: 'count=exact', Range: '0-0' },
+      maxBody: 2000,
+    });
+
+    // O total real vem no header Content-Range: "0-0/1234" ou "*/0".
+    let rows = null;
+    const range = r.headers?.['content-range'];
+    if (range) {
+      const total = String(range).split('/')[1];
+      if (total && total !== '*') rows = Number(total);
+    }
+    if (rows == null && r.ok) {
+      try { rows = Array.isArray(JSON.parse(r.body || '[]')) ? JSON.parse(r.body).length : null; } catch { /* ignore */ }
+    }
+
+    let status;
+    let detail;
+    if (r.status === 0) {
+      status = STATUS.UNKNOWN;
+      detail = r.error;
+    } else if (r.status === 401 || r.status === 403) {
+      status = STATUS.DEGRADED;
+      detail = `acesso negado (HTTP ${r.status}) — permissões do usuário-monitor`;
+    } else if (r.status === 404) {
+      status = STATUS.FAIL;
+      detail = 'tabela não encontrada — schema divergente do esperado';
+    } else if (!r.ok) {
+      status = STATUS.FAIL;
+      detail = scrub(r.error) || `HTTP ${r.status}`;
+    } else if (probe.expectRows && rows === 0) {
+      status = STATUS.FAIL;
+      detail = 'HTTP 200 mas ZERO linhas — a RLS não devolve nem a linha do próprio usuário-monitor';
+    } else {
+      status = statusFromLatency(r.ms, T.dbWarn, T.dbFail);
+      detail = `${rows == null ? 'consulta OK' : `${rows} linha(s) visíveis`} em ${r.ms}ms`;
+    }
+
+    results.push({ table: probe.table, label: probe.label, status, ms: r.ms, rows, detail });
+  }
+
+  const latencies = results.filter((d) => d.ms != null).map((d) => d.ms);
+  const bad = results.filter((d) => d.status === STATUS.FAIL || d.status === STATUS.DEGRADED);
+  const skipped = results.filter((d) => d.status === STATUS.SKIPPED);
+  const emptyRls = results.filter((d) => d.detail?.includes('ZERO linhas'));
+
+  let detail;
+  if (emptyRls.length) detail = `RLS suspeita de quebrada em: ${emptyRls.map((d) => d.table).join(', ')}`;
+  else if (bad.length) detail = `${bad.length} com problema: ${bad.map((d) => d.table).join(', ')}`;
+  else if (skipped.length === results.length) detail = 'nenhuma consulta executada — sem sessão';
+  else detail = `${results.length - skipped.length} tabela(s) OK${skipped.length ? ` · ${skipped.length} pulada(s)` : ''}`;
+
+  return {
+    key: 'database',
+    label: 'Consultas ao banco (com asserção de RLS)',
+    status: worstStatus(results.map((d) => d.status)),
+    latencyMs: latencies.length ? Math.round(median(latencies)) : null,
+    detail,
+    meta: { probes: results },
+  };
+}
+
+async function checkStorage(url, baseHeaders, authed) {
+  if (authed) {
+    const r = await timedFetch(`${url}/storage/v1/bucket`, { headers: baseHeaders, readBody: false });
+    return {
+      key: 'storage',
+      label: 'Armazenamento de arquivos',
+      status: r.ok ? statusFromLatency(r.ms, T.dbWarn, T.dbFail) : r.status === 0 ? STATUS.UNKNOWN : STATUS.FAIL,
+      latencyMs: r.ms,
+      detail: r.ok ? 'serviço respondendo e acessível' : r.error || `HTTP ${r.status}`,
+      meta: {},
+    };
+  }
+  // Sem sessão só dá para provar que o serviço está roteando. Aceitamos apenas
+  // os códigos que o Storage realmente devolve para um objeto inexistente —
+  // um 4xx qualquer do gateway (projeto pausado, por exemplo) NÃO conta.
+  const r = await timedFetch(`${url}/storage/v1/object/public/__monitor_probe__/x`, {
+    headers: baseHeaders,
+    maxBody: 500,
+  });
+  const expected = r.status === 400 || r.status === 404;
+  return {
+    key: 'storage',
+    label: 'Armazenamento de arquivos',
+    status: expected ? statusFromLatency(r.ms, T.dbWarn, T.dbFail) : STATUS.UNKNOWN,
+    latencyMs: r.ms,
+    detail: expected
+      ? 'serviço respondendo (verificação superficial, sem sessão)'
+      : `resposta inesperada (HTTP ${r.status || '—'}) — não verificável sem sessão`,
+    meta: {},
+  };
+}
+
+/**
+ * Autentica o usuário-monitor.
+ * Falha aqui é problema DO MONITOR, não do produto — quem consome este
+ * resultado precisa tratar as duas coisas de forma diferente.
+ */
 export async function signIn() {
   const { email, password } = CONFIG.auth;
   if (!email || !password) {
@@ -150,22 +225,29 @@ export async function signIn() {
     body: JSON.stringify({ email, password }),
     maxBody: 4000,
   });
+
   if (!r.ok) {
+    let code = null;
     let reason = r.error || `HTTP ${r.status}`;
     try {
       const j = JSON.parse(r.body || '{}');
-      reason = sanitize(j.error_description || j.msg || j.message) || reason;
+      code = j.error_code || j.error || null;
+      reason = scrub(j.error_description || j.msg || j.message) || reason;
     } catch { /* ignore */ }
-    return { ok: false, skipped: false, reason, ms: r.ms };
+    // 400/401 = credencial errada/expirada → configuração do monitor.
+    // 5xx/0    = o Auth do produto está com problema.
+    const monitorFault = r.status === 400 || r.status === 401 || r.status === 422 || r.status === 429;
+    return { ok: false, skipped: false, monitorFault, code, reason, ms: r.ms, httpStatus: r.status };
   }
+
   let json = {};
   try { json = JSON.parse(r.body || '{}'); } catch { /* ignore */ }
   return {
     ok: !!json.access_token,
     skipped: false,
+    monitorFault: false,
     ms: r.ms,
     accessToken: json.access_token || null,
-    refreshToken: json.refresh_token || null,
     expiresIn: json.expires_in || null,
     reason: json.access_token ? null : 'resposta sem token de acesso',
   };
@@ -185,15 +267,13 @@ function checkRealtime(url, anonKey) {
       resolve(v);
     };
     const timer = setTimeout(
-      () => finish({ ok: false, ms: CONFIG.timeouts.realtime, error: 'timeout ao abrir o websocket' }),
+      () => finish({ ok: false, ms: CONFIG.timeouts.realtime, error: 'tempo esgotado ao abrir o websocket' }),
       CONFIG.timeouts.realtime,
     );
     try {
       ws = new WebSocket(wsUrl);
       ws.on('open', () => finish({ ok: true, ms: Math.round(performance.now() - t0), error: null }));
-      ws.on('error', (err) =>
-        finish({ ok: false, ms: Math.round(performance.now() - t0), error: describeError(err) }),
-      );
+      ws.on('error', (err) => finish({ ok: false, ms: Math.round(performance.now() - t0), error: describeError(err) }));
       ws.on('close', (code) => {
         if (!settled && code !== 1000) {
           finish({ ok: false, ms: Math.round(performance.now() - t0), error: `websocket fechou (código ${code})` });
@@ -205,14 +285,6 @@ function checkRealtime(url, anonKey) {
   });
 }
 
-function summarize(results) {
-  const ok = results.filter((r) => r.status === STATUS.OK).length;
-  const skipped = results.filter((r) => r.status === STATUS.SKIPPED).length;
-  const bad = results.filter((r) => r.status === STATUS.FAIL || r.status === STATUS.DEGRADED);
-  if (bad.length) return `${bad.length} com problema: ${bad.map((b) => b.table).join(', ')}`;
-  return `${ok} tabela(s) OK${skipped ? ` · ${skipped} pulada(s)` : ''}`;
-}
-
 function median(a) {
   const s = [...a].sort((x, y) => x - y);
   const m = Math.floor(s.length / 2);
@@ -221,14 +293,4 @@ function median(a) {
 
 function hostRef(url) {
   try { return new URL(url).hostname.split('.')[0]; } catch { return null; }
-}
-
-/** Remove qualquer coisa que pareça e-mail, UUID ou token de mensagens de erro. */
-export function sanitize(text) {
-  if (!text) return text;
-  return String(text)
-    .replace(/[\w.+-]+@[\w-]+\.[\w.-]+/g, '«email»')
-    .replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi, '«id»')
-    .replace(/eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/g, '«token»')
-    .slice(0, 400);
 }

@@ -50,11 +50,16 @@ export async function checkUpstreams() {
   else if (unknown.length) detail = `nenhum incidente relatado · ${unknown.length} sem resposta`;
   else detail = 'nenhum incidente relatado';
 
+  // A seção é informativa e não derruba o status geral do produto — mas não
+  // pode ficar pregada em verde por construção: quando nenhuma página de
+  // status responde, o sinal honesto é "indeterminado".
+  const allUnknown = unknown.length === items.length && items.length > 0;
+
   return {
     key: 'upstream',
     label: 'Plataformas de terceiros',
     informational: true,
-    status: STATUS.OK, // nunca derruba o geral
+    status: allUnknown ? STATUS.UNKNOWN : problems.length ? STATUS.DEGRADED : STATUS.OK,
     latencyMs: null,
     items,
     detail,

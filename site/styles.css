@@ -319,3 +319,82 @@ footer a { color: var(--text-dim); }
   .item { grid-template-columns: 14px 1fr; }
   .item .lat { grid-column: 2; font-size: 11.5px; }
 }
+
+/* ---------- adições: chips, deploy, tags, links ---------- */
+
+.mono { font-family: var(--mono); }
+.dim { color: var(--text-faint); }
+
+.chip {
+  display: inline-block;
+  font-size: 10.5px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--card-2);
+  color: var(--text-dim);
+  margin-bottom: 4px;
+}
+.chip-warn { border-color: var(--degraded); color: var(--degraded); background: var(--degraded-bg); }
+
+.tag {
+  display: inline-block;
+  font-size: 10px;
+  font-weight: 500;
+  color: var(--text-faint);
+  border: 1px solid var(--border-soft);
+  border-radius: 5px;
+  padding: 0 5px;
+  margin-left: 5px;
+  vertical-align: 1px;
+}
+
+/* Caixa do build: primeira pergunta durante um incidente é "o deploy mudou?" */
+.deploy {
+  display: flex;
+  gap: 16px;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--card);
+  box-shadow: var(--shadow);
+  padding: 13px 17px;
+  margin-bottom: 22px;
+}
+.deploy-recent { border-color: var(--degraded); background: var(--degraded-bg); }
+.deploy-label { font-size: 11px; text-transform: uppercase; letter-spacing: .5px; color: var(--text-faint); font-weight: 600; }
+.deploy-files { font-size: 11.5px; color: var(--text-dim); margin-top: 3px; word-break: break-all; }
+.deploy-when { font-size: 12px; color: var(--text-dim); text-align: right; line-height: 1.5; }
+
+.item-info { opacity: .82; }
+
+.links { display: flex; flex-wrap: wrap; gap: 8px; }
+.links a {
+  font-size: 12px;
+  padding: 6px 11px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--card-2);
+  color: var(--text);
+  text-decoration: none;
+  transition: border-color .15s, background .15s;
+}
+.links a:hover { border-color: var(--accent); background: var(--accent-soft); }
+
+/* Sem visibilidade tem que ser VISÍVEL: antes era idêntico a barra vazia,
+   justamente no estado que mais importa. */
+.bars i[data-s='unknown'] {
+  background: repeating-linear-gradient(
+    45deg,
+    var(--unknown) 0 2px,
+    transparent 2px 4px
+  );
+  opacity: .85;
+}
+
+@media (max-width: 620px) {
+  .deploy-when { text-align: left; }
+}
