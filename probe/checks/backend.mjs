@@ -38,14 +38,32 @@ export async function checkBackend(session) {
   });
 
   // --- PostgREST ---
-  const rest = await timedFetch(`${url}/rest/v1/`, { headers: baseHeaders, readBody: false });
+  // NÃO sondar a raiz `/rest/v1/`: ela serve o schema OpenAPI, que o projeto
+  // pode legitimamente bloquear — e bloqueia: em produção ela devolve 401 com
+  // a MESMA credencial com que as consultas de tabela passam. Sondar a raiz
+  // produzia um vermelho permanente com o serviço saudável. Uma rota de tabela
+  // real prova roteamento + PostgREST vivos; sob RLS sem sessão ela devolve
+  // 200 vazio, que ainda é prova de vida (linhas visíveis são asserção da
+  // sonda `database`, não desta).
+  const restTable = CONFIG.dbProbes[0]?.table || 'profiles';
+  const rest = await timedFetch(`${url}/rest/v1/${restTable}?select=id&limit=1`, {
+    headers: baseHeaders,
+    readBody: false,
+  });
+  const restStale = rest.status === 404; // PostgREST respondeu; a tabela da sonda é que não existe mais
   items.push({
     key: 'postgrest',
     label: 'API do banco (PostgREST)',
-    status: rest.ok ? statusFromLatency(rest.ms, T.dbWarn, T.dbFail) : STATUS.FAIL,
+    status: rest.ok
+      ? statusFromLatency(rest.ms, T.dbWarn, T.dbFail)
+      : restStale ? STATUS.DEGRADED : STATUS.FAIL,
     latencyMs: rest.ms,
-    detail: rest.ok ? 'no ar' : rest.error || `HTTP ${rest.status}`,
-    meta: {},
+    detail: rest.ok
+      ? 'no ar'
+      : restStale
+        ? `sonda desatualizada: a tabela "${restTable}" não existe mais (o serviço respondeu)`
+        : rest.error || `HTTP ${rest.status}`,
+    meta: { probeTable: restTable },
   });
 
   // --- Healthcheck oficial do PrimeDoctor (consulta com service role) ---
