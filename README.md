@@ -156,8 +156,11 @@ sistemas operacionais", porque metade das verificações não aconteceu.
 
 | Secret | Para quê |
 |---|---|
-| `MONITOR_WEBHOOK_URL` | webhook de Slack, Discord ou Teams. Recebe a mensagem de alerta com link para a execução. |
-| `HEARTBEAT_URL` | URL de *dead-man's switch* ([healthchecks.io](https://healthchecks.io) tem plano grátis). O monitor pinga a cada execução; se o ping parar de chegar, o serviço avisa. **É a única coisa que detecta o monitor em si tendo morrido.** |
+| `HEARTBEAT_URL` | URL de check do [healthchecks.io](https://healthchecks.io) (plano grátis). Faz **duas** coisas: recebe o pulso de cada execução saudável — se o pulso parar de chegar, o serviço avisa, e essa é a única forma de detectar o monitor em si tendo morrido — e recebe um `POST` em `<URL>/fail` quando há alarme, disparando os canais de notificação já configurados lá (e-mail, push do app, SMS). |
+| `MONITOR_WEBHOOK_URL` | *Opcional.* Webhook de Slack, Discord ou Teams. Só configure se você já usa alguma dessas ferramentas — o healthchecks.io sozinho já entrega o alerta. |
+
+Com apenas o `HEARTBEAT_URL` você tem alerta completo — queda do PrimeDoctor
+**e** morte do próprio monitor — sem depender de nenhuma ferramenta de chat.
 
 O job de alerta dispara em três situações: falha confirmada no PrimeDoctor,
 falha ao publicar/persistir, e **falha do próprio job de verificação** — o caso
