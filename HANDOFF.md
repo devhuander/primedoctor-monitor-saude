@@ -96,6 +96,14 @@ primeira rodada real, item a item:
   execuções com os secrets configurados (bearer vira o token da sessão), o
   item resolve sozinho; se persistir mesmo assim, é rotação de chave.
 
+**Defeito real pego pela execução nº 4 (cron, enfileirada atrás da nº 3):**
+ela nasceu com o SHA de antes do commit de dados da nº 3 — o `persistir`
+conflitou em add/add nas 5 tentativas (o `alertar` disparou por isso,
+corretamente), e o `verificar` rodou sem enxergar o histórico, então a regra
+de "2 ruins consecutivas ⇒ alarme" não contou a segunda como segunda. Conserto
+nesta branch: `ref: main` nos dois checkouts. Até chegar à `main`, o cron
+horário sozinho não sofre disso (só execuções enfileiradas atrás de outra).
+
 **Workflow Jekyll intruso**: ao ligar o Pages, o assistente do GitHub commitou
 `.github/workflows/jekyll-gh-pages.yml` na `main` (9f9257c). Ele deploya o
 README renderizado por cima do painel a cada push na `main` (os commits do
