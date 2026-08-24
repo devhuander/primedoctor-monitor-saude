@@ -1,1 +1,17 @@
-[]
+[
+  {
+    "startedAt": "2026-08-24T17:46:21.745Z",
+    "endedAt": null,
+    "worst": "fail",
+    "checks": 2,
+    "areas": [
+      "backend"
+    ],
+    "items": [
+      "backend/postgrest",
+      "backend/system-health"
+    ],
+    "blindSpots": 0,
+    "durationMinutes": null
+  }
+]

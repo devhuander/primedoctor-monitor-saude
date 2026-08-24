@@ -1,1 +1,2 @@
 {"t":"2026-08-24T17:46:21.745Z","s":"fail","c":0,"bd":1,"f":"ok","b":"fail","e":"ok","x":"skipped","fp":"6da0b65b","lat":{"doc":575,"db":565,"edge":341,"load":1341,"lcp":1812,"login":null},"bad":["backend/postgrest"]}
+{"t":"2026-08-24T18:58:44.811Z","s":"fail","c":1,"bd":1,"f":"ok","b":"fail","e":"ok","x":"skipped","fp":"7d48595f","lat":{"doc":667,"db":1530,"edge":589,"load":1418,"lcp":1829,"login":null},"bad":["backend/postgrest","backend/system-health"]}
