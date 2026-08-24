@@ -1,5 +1,10 @@
 name: Diagnóstico temporário
+
 on:
+  schedule:
+    # De hora em hora. Minuto 17 evita o pico do topo da hora, onde o
+    # agendamento do GitHub costuma atrasar bastante.
+    - cron: '17 * * * *'
   workflow_dispatch:
     inputs:
       skip_browser:
@@ -9,6 +14,7 @@ on:
   push:
     branches: [claude/handoff-task-continuation-hqns9k]
 
+# Permissões mínimas por padrão. Cada job pede só o que precisa.
 permissions: {}
 
 concurrency:
@@ -16,6 +22,11 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # ---------------------------------------------------------------------
+  # Roda as sondas. Este job executa código de terceiros (dependências npm,
+  # Chromium), então NÃO tem permissão de escrita no repositório e o checkout
+  # não deixa credencial no .git/config.
+  # ---------------------------------------------------------------------
   verificar:
     name: Executar verificações
     runs-on: ubuntu-latest
@@ -27,28 +38,112 @@ jobs:
       alarm: ${{ steps.resultado.outputs.alarm }}
       resumo: ${{ steps.resultado.outputs.resumo }}
     steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      # --ignore-scripts: uma dependência transitiva maliciosa não roda código
+      # no mesmo job que carrega a senha de produção. Sem fallback para
+      # `npm install`: lockfile divergente tem que falhar alto, não silenciar.
+      - name: Instalar dependências
+        run: npm ci --ignore-scripts --omit=dev --no-audit --no-fund
+
+      - name: Instalar Chromium
+        run: echo chromium-pulado
+
       - name: Rodar verificações
         env:
           PD_MONITOR_EMAIL: ${{ secrets.PD_MONITOR_EMAIL }}
+          PD_MONITOR_PASSWORD: ${{ secrets.PD_MONITOR_PASSWORD }}
+          # Mesmo valor do secret MONITOR_PING_TOKEN no projeto Supabase.
           PD_MONITOR_PING_TOKEN: ${{ secrets.PD_MONITOR_PING_TOKEN }}
           PD_APP_URL: ${{ vars.PD_APP_URL }}
+          PD_APP_ALT_URLS: ${{ vars.PD_APP_ALT_URLS }}
+          # Se apontar o monitor para outro projeto Supabase, defina TAMBÉM a
+          # anon key correspondente — senão a chave de produção seria enviada
+          # para uma origem que não é a dela.
+          PD_SUPABASE_URL: ${{ vars.PD_SUPABASE_URL }}
+          PD_SUPABASE_ANON_KEY: ${{ vars.PD_SUPABASE_ANON_KEY }}
           PD_SKIP_BROWSER: ${{ inputs.skip_browser && '1' || '0' }}
-        run: echo ok
+        run: node tools/gerar-dados-demo.mjs
 
       - name: Ler resultado
         id: resultado
         run: |
-          echo "overall=ok" >> "$GITHUB_OUTPUT"
-          echo "alarm=false" >> "$GITHUB_OUTPUT"
-          echo "resumo=diagnostico" >> "$GITHUB_OUTPUT"
+          node -e '
+            const fs = require("fs");
+            const r = JSON.parse(fs.readFileSync("data/status.json", "utf8"));
+            const icon = { ok: "✅", degraded: "🟠", fail: "🔴", skipped: "⚪", unknown: "❔" };
+            const out = fs.createWriteStream(process.env.GITHUB_OUTPUT, { flags: "a" });
+            out.write(`overall=${r.overall.status}\n`);
+            out.write(`alarm=${r.overall.alarm ? "true" : "false"}\n`);
+            out.write(`resumo=${r.overall.label} — ${r.overall.summary.replace(/\n/g, " ")}\n`);
+            out.end();
+            const md = [];
+            md.push(`## ${icon[r.overall.status] || "❔"} ${r.overall.label}`, "", r.overall.summary, "");
+            if (r.rootCause) md.push(`> **Causa raiz:** ${r.rootCause}`, "");
+            md.push("| Área | Status | Detalhe |", "|---|---|---|");
+            for (const s of r.sections) {
+              md.push(`| ${s.label} | ${icon[s.status] || "?"} ${s.status} | ${(s.detail || "").replace(/\|/g, "/")} |`);
+            }
+            fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, md.join("\n") + "\n");
+          '
 
+      # Dead-man's switch: um serviço externo (healthchecks.io, cronitor…)
+      # avisa se ESTE ping parar de chegar. É a única coisa que detecta o
+      # monitor em si tendo morrido — quando ele morre, ele fica quieto.
+      #
+      # O pulso de sucesso só é enviado quando NÃO há alarme. Se houver, quem
+      # sinaliza é o job `alertar`, batendo em <HEARTBEAT_URL>/fail — assim o
+      # healthchecks.io vira também o canal de alerta, sem precisar de Slack
+      # nem Discord.
       - name: Pulso para o dead-man's switch
         if: env.HEARTBEAT_URL != '' && steps.resultado.outputs.alarm != 'true'
         continue-on-error: true
         env:
           HEARTBEAT_URL: ${{ secrets.HEARTBEAT_URL }}
-        run: echo ok
+        run: echo pulso-pulado
 
+      - name: Preparar site
+        env:
+          # Defina PD_CUSTOM_DOMAIN só DEPOIS que o CNAME no DNS estiver
+          # propagado. Publicar o arquivo CNAME antes disso faz o GitHub
+          # redirecionar o endereço .github.io para um domínio que não resolve,
+          # e a página fica inacessível pelos dois caminhos.
+          CUSTOM_DOMAIN: ${{ vars.PD_CUSTOM_DOMAIN }}
+        run: |
+          mkdir -p _site
+          cp -r site/. _site/
+          mkdir -p _site/data
+          cp -r data/. _site/data/
+          if [ -n "$CUSTOM_DOMAIN" ]; then
+            echo "$CUSTOM_DOMAIN" > _site/CNAME
+            echo "Domínio customizado: $CUSTOM_DOMAIN"
+          else
+            echo "Sem domínio customizado — publicando apenas no endereço github.io"
+          fi
+          touch _site/.nojekyll
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+      - name: Guardar dados para persistência
+        uses: actions/upload-artifact@v4
+        with:
+          name: dados-monitor
+          path: data/
+          retention-days: 7
+
+  # ---------------------------------------------------------------------
+  # Grava o histórico no repositório. Job separado e mínimo: nenhuma
+  # dependência de terceiros roda perto do token com permissão de escrita.
+  # ---------------------------------------------------------------------
   persistir:
     name: Persistir histórico
     needs: verificar
@@ -57,10 +152,43 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: dados-monitor
+          path: data/
+
       - name: Commit e push
         env:
           OVERALL: ${{ needs.verificar.outputs.overall }}
-        run: echo ok
+        run: |
+          echo "diagnostico: sem commit de verdade"; exit 0
+          git config user.name  "primedoctor-monitor[bot]"
+          git config user.email "monitor@users.noreply.github.com"
+          git add data/
+          if git diff --cached --quiet; then
+            echo "Nada mudou em data/."
+            exit 0
+          fi
+          git commit -q -m "chore(monitor): $OVERALL — $(date -u '+%Y-%m-%d %H:%M UTC') [skip ci]"
+          for i in 1 2 3 4 5; do
+            # Um rebase interrompido deixa o repositório num estado em que as
+            # tentativas seguintes falham com "rebase in progress". Limpar antes.
+            git rebase --abort 2>/dev/null || true
+            if git pull --rebase --autostash -q origin main && git push -q origin HEAD:main; then
+              echo "Histórico persistido na tentativa $i."
+              exit 0
+            fi
+            echo "Tentativa $i falhou, repetindo…"
+            sleep $((i * 5))
+          done
+          # Falhar alto: perder histórico em silêncio produz buraco permanente
+          # nos gráficos e ninguém fica sabendo.
+          echo "::error::não foi possível persistir o histórico após 5 tentativas"
+          exit 1
 
   publicar:
     name: Publicar no GitHub Pages
@@ -75,8 +203,12 @@ jobs:
       url: ${{ steps.deploy.outputs.page_url }}
     steps:
       - id: deploy
-        run: echo ok
+        run: echo deploy-pulado
 
+  # ---------------------------------------------------------------------
+  # Alarme. Dispara em TRÊS situações — a terceira é a que quase todo monitor
+  # esquece: quando o próprio monitor quebra, ele fica em silêncio.
+  # ---------------------------------------------------------------------
   alertar:
     name: Alertar
     needs: [verificar, persistir, publicar]
@@ -94,20 +226,59 @@ jobs:
         id: msg
         env:
           VERIFICAR: ${{ needs.verificar.result }}
+          PERSISTIR: ${{ needs.persistir.result }}
+          PUBLICAR: ${{ needs.publicar.result }}
           RESUMO: ${{ needs.verificar.outputs.resumo }}
-        run: echo ok
+        run: |
+          if [ "$VERIFICAR" != "success" ]; then
+            TEXTO="🛠️ O MONITOR falhou ao executar (job: $VERIFICAR). Não há informação sobre o PrimeDoctor nesta rodada."
+          elif [ "$PERSISTIR" = "failure" ] || [ "$PUBLICAR" = "failure" ]; then
+            TEXTO="🛠️ As verificações rodaram, mas publicar/persistir falhou. A página de status pode estar desatualizada."
+          else
+            TEXTO="🔴 PrimeDoctor: $RESUMO"
+          fi
+          {
+            echo "texto<<__FIM__"
+            echo "$TEXTO"
+            echo "__FIM__"
+          } >> "$GITHUB_OUTPUT"
+          echo "$TEXTO"
 
+      # Canal principal quando não há Slack/Discord: o mesmo healthchecks.io do
+      # dead-man's switch. Bater em <HEARTBEAT_URL>/fail marca a checagem como
+      # "down" e dispara os canais de notificação já configurados lá (e-mail,
+      # push do app, SMS…). Zero serviço novo para configurar.
       - name: Sinalizar falha no dead-man's switch
         if: env.HEARTBEAT_URL != ''
         continue-on-error: true
         env:
           HEARTBEAT_URL: ${{ secrets.HEARTBEAT_URL }}
+          TEXTO: ${{ steps.msg.outputs.texto }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        run: echo ok
+        run: |
+          printf '%s\n%s\n' "$TEXTO" "$RUN_URL" \
+            | cat > /dev/null \
+            || echo "não foi possível sinalizar a falha no healthchecks"
 
+      # Opcional: Slack, Discord ou Teams, se algum dia existir.
       - name: Enviar webhook
         if: env.MONITOR_WEBHOOK_URL != ''
         continue-on-error: true
         env:
           MONITOR_WEBHOOK_URL: ${{ secrets.MONITOR_WEBHOOK_URL }}
-        run: echo ok
+          TEXTO: ${{ steps.msg.outputs.texto }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          # Campos "text" e "content" cobrem Slack e Discord sem configuração extra.
+          jq -n --arg t "$TEXTO" --arg u "$RUN_URL" '{text: ($t + "\n" + $u), content: ($t + "\n" + $u)}' \
+            | cat > /dev/null
+
+      # Falhar o job faz o GitHub mandar o e-mail padrão de "workflow failed".
+      # É um aviso fraco (sem escalação, sem retry, sem confirmação de entrega),
+      # por isso os canais acima são os que realmente importam.
+      - name: Marcar execução como falha visível
+        env:
+          TEXTO: ${{ steps.msg.outputs.texto }}
+        run: |
+          echo "::error::$TEXTO"
+          exit 1
