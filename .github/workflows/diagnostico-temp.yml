@@ -1,6 +1,8 @@
 name: Diagnóstico temporário
 on:
   workflow_dispatch:
+  push:
+    branches: [claude/handoff-task-continuation-hqns9k]
 jobs:
   ola:
     runs-on: ubuntu-latest
