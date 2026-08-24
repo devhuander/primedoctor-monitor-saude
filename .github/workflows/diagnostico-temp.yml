@@ -1,10 +1,113 @@
 name: Diagnóstico temporário
 on:
   workflow_dispatch:
+    inputs:
+      skip_browser:
+        description: 'Pular a checagem com navegador (mais rápido)'
+        type: boolean
+        default: false
   push:
     branches: [claude/handoff-task-continuation-hqns9k]
+
+permissions: {}
+
+concurrency:
+  group: diagnostico-temp
+  cancel-in-progress: false
+
 jobs:
-  ola:
+  verificar:
+    name: Executar verificações
     runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    outputs:
+      overall: ${{ steps.resultado.outputs.overall }}
+      alarm: ${{ steps.resultado.outputs.alarm }}
+      resumo: ${{ steps.resultado.outputs.resumo }}
     steps:
-      - run: echo "runner funcionando"
+      - name: Rodar verificações
+        env:
+          PD_MONITOR_EMAIL: ${{ secrets.PD_MONITOR_EMAIL }}
+          PD_MONITOR_PING_TOKEN: ${{ secrets.PD_MONITOR_PING_TOKEN }}
+          PD_APP_URL: ${{ vars.PD_APP_URL }}
+          PD_SKIP_BROWSER: ${{ inputs.skip_browser && '1' || '0' }}
+        run: echo ok
+
+      - name: Ler resultado
+        id: resultado
+        run: |
+          echo "overall=ok" >> "$GITHUB_OUTPUT"
+          echo "alarm=false" >> "$GITHUB_OUTPUT"
+          echo "resumo=diagnostico" >> "$GITHUB_OUTPUT"
+
+      - name: Pulso para o dead-man's switch
+        if: env.HEARTBEAT_URL != '' && steps.resultado.outputs.alarm != 'true'
+        continue-on-error: true
+        env:
+          HEARTBEAT_URL: ${{ secrets.HEARTBEAT_URL }}
+        run: echo ok
+
+  persistir:
+    name: Persistir histórico
+    needs: verificar
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Commit e push
+        env:
+          OVERALL: ${{ needs.verificar.outputs.overall }}
+        run: echo ok
+
+  publicar:
+    name: Publicar no GitHub Pages
+    needs: verificar
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - id: deploy
+        run: echo ok
+
+  alertar:
+    name: Alertar
+    needs: [verificar, persistir, publicar]
+    if: >-
+      always() && (
+        needs.verificar.result != 'success' ||
+        needs.persistir.result == 'failure' ||
+        needs.publicar.result == 'failure' ||
+        needs.verificar.outputs.alarm == 'true'
+      )
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Montar mensagem
+        id: msg
+        env:
+          VERIFICAR: ${{ needs.verificar.result }}
+          RESUMO: ${{ needs.verificar.outputs.resumo }}
+        run: echo ok
+
+      - name: Sinalizar falha no dead-man's switch
+        if: env.HEARTBEAT_URL != ''
+        continue-on-error: true
+        env:
+          HEARTBEAT_URL: ${{ secrets.HEARTBEAT_URL }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: echo ok
+
+      - name: Enviar webhook
+        if: env.MONITOR_WEBHOOK_URL != ''
+        continue-on-error: true
+        env:
+          MONITOR_WEBHOOK_URL: ${{ secrets.MONITOR_WEBHOOK_URL }}
+        run: echo ok
