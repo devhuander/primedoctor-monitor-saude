@@ -103,17 +103,6 @@ jobs:
           cp -r data/. _site/data/
           touch _site/.nojekyll
 
-      - uses: actions/upload-pages-artifact@v3
-        with:
-          path: _site
-
-      - name: Guardar dados para persistência
-        uses: actions/upload-artifact@v4
-        with:
-          name: dados-monitor
-          path: data/
-          retention-days: 7
-
   # ---------------------------------------------------------------------
   # Grava o histórico no repositório. Job separado e mínimo: nenhuma
   # dependência de terceiros roda perto do token com permissão de escrita.
@@ -129,11 +118,6 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 1
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: dados-monitor
-          path: data/
 
       - name: Commit e push
         env:
