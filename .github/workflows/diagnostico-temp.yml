@@ -75,24 +75,9 @@ jobs:
       - name: Ler resultado
         id: resultado
         run: |
-          node -e '
-            const fs = require("fs");
-            const r = JSON.parse(fs.readFileSync("data/status.json", "utf8"));
-            const icon = { ok: "✅", degraded: "🟠", fail: "🔴", skipped: "⚪", unknown: "❔" };
-            const out = fs.createWriteStream(process.env.GITHUB_OUTPUT, { flags: "a" });
-            out.write(`overall=${r.overall.status}\n`);
-            out.write(`alarm=${r.overall.alarm ? "true" : "false"}\n`);
-            out.write(`resumo=${r.overall.label} — ${r.overall.summary.replace(/\n/g, " ")}\n`);
-            out.end();
-            const md = [];
-            md.push(`## ${icon[r.overall.status] || "❔"} ${r.overall.label}`, "", r.overall.summary, "");
-            if (r.rootCause) md.push(`> **Causa raiz:** ${r.rootCause}`, "");
-            md.push("| Área | Status | Detalhe |", "|---|---|---|");
-            for (const s of r.sections) {
-              md.push(`| ${s.label} | ${icon[s.status] || "?"} ${s.status} | ${(s.detail || "").replace(/\|/g, "/")} |`);
-            }
-            fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, md.join("\n") + "\n");
-          '
+          echo "overall=ok" >> "$GITHUB_OUTPUT"
+          echo "alarm=false" >> "$GITHUB_OUTPUT"
+          echo "resumo=diagnostico" >> "$GITHUB_OUTPUT"
 
       # Dead-man's switch: um serviço externo (healthchecks.io, cronitor…)
       # avisa se ESTE ping parar de chegar. É a única coisa que detecta o
@@ -111,22 +96,11 @@ jobs:
 
       - name: Preparar site
         env:
-          # Defina PD_CUSTOM_DOMAIN só DEPOIS que o CNAME no DNS estiver
-          # propagado. Publicar o arquivo CNAME antes disso faz o GitHub
-          # redirecionar o endereço .github.io para um domínio que não resolve,
-          # e a página fica inacessível pelos dois caminhos.
           CUSTOM_DOMAIN: ${{ vars.PD_CUSTOM_DOMAIN }}
         run: |
-          mkdir -p _site
-          cp -r site/. _site/
           mkdir -p _site/data
+          cp -r site/. _site/
           cp -r data/. _site/data/
-          if [ -n "$CUSTOM_DOMAIN" ]; then
-            echo "$CUSTOM_DOMAIN" > _site/CNAME
-            echo "Domínio customizado: $CUSTOM_DOMAIN"
-          else
-            echo "Sem domínio customizado — publicando apenas no endereço github.io"
-          fi
           touch _site/.nojekyll
 
       - uses: actions/upload-pages-artifact@v3
@@ -164,31 +138,7 @@ jobs:
       - name: Commit e push
         env:
           OVERALL: ${{ needs.verificar.outputs.overall }}
-        run: |
-          echo "diagnostico: sem commit de verdade"; exit 0
-          git config user.name  "primedoctor-monitor[bot]"
-          git config user.email "monitor@users.noreply.github.com"
-          git add data/
-          if git diff --cached --quiet; then
-            echo "Nada mudou em data/."
-            exit 0
-          fi
-          git commit -q -m "chore(monitor): $OVERALL — $(date -u '+%Y-%m-%d %H:%M UTC') [skip ci]"
-          for i in 1 2 3 4 5; do
-            # Um rebase interrompido deixa o repositório num estado em que as
-            # tentativas seguintes falham com "rebase in progress". Limpar antes.
-            git rebase --abort 2>/dev/null || true
-            if git pull --rebase --autostash -q origin main && git push -q origin HEAD:main; then
-              echo "Histórico persistido na tentativa $i."
-              exit 0
-            fi
-            echo "Tentativa $i falhou, repetindo…"
-            sleep $((i * 5))
-          done
-          # Falhar alto: perder histórico em silêncio produz buraco permanente
-          # nos gráficos e ninguém fica sabendo.
-          echo "::error::não foi possível persistir o histórico após 5 tentativas"
-          exit 1
+        run: echo diagnostico
 
   publicar:
     name: Publicar no GitHub Pages
@@ -229,25 +179,8 @@ jobs:
           PERSISTIR: ${{ needs.persistir.result }}
           PUBLICAR: ${{ needs.publicar.result }}
           RESUMO: ${{ needs.verificar.outputs.resumo }}
-        run: |
-          if [ "$VERIFICAR" != "success" ]; then
-            TEXTO="🛠️ O MONITOR falhou ao executar (job: $VERIFICAR). Não há informação sobre o PrimeDoctor nesta rodada."
-          elif [ "$PERSISTIR" = "failure" ] || [ "$PUBLICAR" = "failure" ]; then
-            TEXTO="🛠️ As verificações rodaram, mas publicar/persistir falhou. A página de status pode estar desatualizada."
-          else
-            TEXTO="🔴 PrimeDoctor: $RESUMO"
-          fi
-          {
-            echo "texto<<__FIM__"
-            echo "$TEXTO"
-            echo "__FIM__"
-          } >> "$GITHUB_OUTPUT"
-          echo "$TEXTO"
+        run: echo diagnostico
 
-      # Canal principal quando não há Slack/Discord: o mesmo healthchecks.io do
-      # dead-man's switch. Bater em <HEARTBEAT_URL>/fail marca a checagem como
-      # "down" e dispara os canais de notificação já configurados lá (e-mail,
-      # push do app, SMS…). Zero serviço novo para configurar.
       - name: Sinalizar falha no dead-man's switch
         if: env.HEARTBEAT_URL != ''
         continue-on-error: true
@@ -255,12 +188,8 @@ jobs:
           HEARTBEAT_URL: ${{ secrets.HEARTBEAT_URL }}
           TEXTO: ${{ steps.msg.outputs.texto }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        run: |
-          printf '%s\n%s\n' "$TEXTO" "$RUN_URL" \
-            | cat > /dev/null \
-            || echo "não foi possível sinalizar a falha no healthchecks"
+        run: echo diagnostico
 
-      # Opcional: Slack, Discord ou Teams, se algum dia existir.
       - name: Enviar webhook
         if: env.MONITOR_WEBHOOK_URL != ''
         continue-on-error: true
@@ -268,17 +197,9 @@ jobs:
           MONITOR_WEBHOOK_URL: ${{ secrets.MONITOR_WEBHOOK_URL }}
           TEXTO: ${{ steps.msg.outputs.texto }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        run: |
-          # Campos "text" e "content" cobrem Slack e Discord sem configuração extra.
-          jq -n --arg t "$TEXTO" --arg u "$RUN_URL" '{text: ($t + "\n" + $u), content: ($t + "\n" + $u)}' \
-            | cat > /dev/null
+        run: echo diagnostico
 
-      # Falhar o job faz o GitHub mandar o e-mail padrão de "workflow failed".
-      # É um aviso fraco (sem escalação, sem retry, sem confirmação de entrega),
-      # por isso os canais acima são os que realmente importam.
       - name: Marcar execução como falha visível
         env:
           TEXTO: ${{ steps.msg.outputs.texto }}
-        run: |
-          echo "::error::$TEXTO"
-          exit 1
+        run: echo diagnostico
