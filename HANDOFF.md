@@ -71,11 +71,44 @@ esperar o cron das :17).
 2. Página pública de status em repo privado continua acessível a qualquer um
    que tenha a URL do Pages — o Pages publicado é sempre público.
 
+## Atualização 24/08 ~18h UTC — política liberada, primeira execução real rodou
+
+O dono liberou a política de Actions e ligou o Pages. A execução nº 3 completou
+os 4 jobs: `verificar` ✓, `publicar` ✓ (página no ar), `persistir` ✓ (dados na
+`main`), `alertar` pulado (1ª execução ruim não alarma — correto). Resultado da
+primeira rodada real, item a item:
+
+- canário `__canary__`: **ok** — detecção validada em produção;
+- 13 funções publicadas e roteáveis;
+- **nenhum secret chegou à execução**: `prontidão não verificada (sem
+  PD_MONITOR_PING_TOKEN)`, `database: sem sessão`, `authed.flow: usuário-monitor
+  não configurado`, e o pulso de heartbeat foi *skipped* (HEARTBEAT_URL vazio).
+  Os quatro secrets do repositório não estão visíveis ao workflow — conferir se
+  foram criados como **Repository secrets** deste repositório (Settings →
+  Secrets and variables → Actions → aba "Secrets" → "Repository secrets"), e
+  não como Variables, secrets de Environment (`github-pages`) ou no repositório
+  errado;
+- `postgrest: HTTP 401` com a anon key (idêntica à do app, conferida no código
+  do PrimeDoctor). Hipóteses: transitório (upstream registrou "Supabase:
+  Partially Degraded Service") ou JWT secret do projeto rotacionado (o gateway
+  aceita a anon key como apikey literal, mas o PostgREST valida a ASSINATURA —
+  explica auth/storage/functions ok com REST 401). Se persistir nas próximas
+  execuções com os secrets configurados (bearer vira o token da sessão), o
+  item resolve sozinho; se persistir mesmo assim, é rotação de chave.
+
+**Workflow Jekyll intruso**: ao ligar o Pages, o assistente do GitHub commitou
+`.github/workflows/jekyll-gh-pages.yml` na `main` (9f9257c). Ele deploya o
+README renderizado por cima do painel a cada push na `main` (os commits do
+monitor têm `[skip ci]`, mas pushes manuais disparam os dois deploys em
+corrida). A remoção está nesta branch.
+
 ## Tarefas, em ordem
 
 ### 1. ~~Commitar e enviar o que ficou pendente~~ — FEITO (58d3ffc)
 
-### 1b. Destravar a política de Actions (ver acima) — só o dono consegue
+### 1b. ~~Destravar a política de Actions~~ — FEITO pelo dono (24/08 ~17:33 UTC)
+
+### 1c. Fazer os secrets chegarem ao workflow — pendente, só o dono consegue
 
 ### 1-original. Commitar e enviar o que ficou pendente
 
