@@ -32,9 +32,52 @@ alterados no diretório de trabalho e **ainda não foram commitados**:
 
 ---
 
+## Situação em 24/08/2026 (sessão remota)
+
+A tarefa 1 foi cumprida: o usuário empurrou o pendente na `main` (commit
+`58d3ffc`) e `npm test` + `npm run test:page` passam integralmente sobre esse
+estado.
+
+O push disparou a primeira execução — e ela morreu em `startup_failure`,
+antes de criar qualquer job. Bisseção com um workflow descartável (9
+execuções na branch `claude/handoff-task-continuation-hqns9k`) provou:
+
+- o `monitor.yml` é **válido** (actionlint zero achados; uma cópia estrutural
+  com os mesmos gatilhos, permissões, `environment` e expressões roda);
+- qualquer passo `uses:` de action externa mata a execução na partida —
+  `actions/checkout@v4` sozinho reproduz, e `@v5` falha igual, o que descarta
+  depreciação de versão;
+- sem nenhum `uses:`, os jobs nascem e rodam.
+
+**Causa: a política de GitHub Actions do repositório está bloqueando actions
+externas** (modo "Allow select actions" sem liberar nem as do próprio GitHub,
+ou "local only"). Isso é configuração, só o dono altera:
+
+> `Settings` → `Actions` → `General` → **Actions permissions** →
+> marcar **"Allow all actions and reusable workflows"** (ou, no mínimo,
+> "Allow <owner>, and select non-<owner>, actions" + caixa
+> **"Allow actions created by GitHub"** — o workflow só usa actions oficiais).
+
+Depois de mudar, basta `Actions` → `Monitor de saúde` → `Run workflow` (ou
+esperar o cron das :17).
+
+**Atenção: o repositório está PRIVADO.** Duas consequências:
+
+1. O `CLAUDE.md` e toda a política de sanitização partem de "repositório
+   público" — privado hoje não fere nada, mas se a intenção é abrir depois,
+   nada muda; se a intenção é manter privado, o GitHub Pages de repositório
+   privado exige plano pago (senão o job `publicar` falha mesmo com a
+   política corrigida).
+2. Página pública de status em repo privado continua acessível a qualquer um
+   que tenha a URL do Pages — o Pages publicado é sempre público.
+
 ## Tarefas, em ordem
 
-### 1. Commitar e enviar o que ficou pendente
+### 1. ~~Commitar e enviar o que ficou pendente~~ — FEITO (58d3ffc)
+
+### 1b. Destravar a política de Actions (ver acima) — só o dono consegue
+
+### 1-original. Commitar e enviar o que ficou pendente
 
 ```bash
 cd D:\GitHub\primedoctor-monitor-saude
