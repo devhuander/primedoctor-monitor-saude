@@ -140,6 +140,25 @@ test(
 );
 
 test(
+  'resposta do ping é tratada como hostil: só nomes de variável são publicados',
+  {
+    faltandoSecrets: {
+      'zapi-webhook': ['ZAPI_WEBHOOK_SECRET', 'ERROR: Key (phone_number)=(+5562999998888) already exists'],
+    },
+  },
+  ({ edge }) => {
+    const fn = edge.items.find((i) => i.key === 'zapi-webhook');
+    assert.equal(fn.status, 'fail');
+    const publicado = JSON.stringify(fn);
+    assert.match(publicado, /ZAPI_WEBHOOK_SECRET/, 'o nome válido tem que continuar aparecendo');
+    assert.doesNotMatch(publicado, /5562999998888/, 'texto cru do upstream NUNCA pode ser publicado');
+    assert.doesNotMatch(publicado, /phone_number/, 'texto cru do upstream NUNCA pode ser publicado');
+    assert.match(publicado, /suprimida/, 'a supressão precisa ser visível, não silenciosa');
+  },
+  { ping: true },
+);
+
+test(
   'com todos os secrets, a prontidão é confirmada explicitamente',
   {},
   ({ edge }) => {

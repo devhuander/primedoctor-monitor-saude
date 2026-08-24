@@ -32,9 +32,93 @@ alterados no diretório de trabalho e **ainda não foram commitados**:
 
 ---
 
+## Situação em 24/08/2026 (sessão remota)
+
+A tarefa 1 foi cumprida: o usuário empurrou o pendente na `main` (commit
+`58d3ffc`) e `npm test` + `npm run test:page` passam integralmente sobre esse
+estado.
+
+O push disparou a primeira execução — e ela morreu em `startup_failure`,
+antes de criar qualquer job. Bisseção com um workflow descartável (9
+execuções na branch `claude/handoff-task-continuation-hqns9k`) provou:
+
+- o `monitor.yml` é **válido** (actionlint zero achados; uma cópia estrutural
+  com os mesmos gatilhos, permissões, `environment` e expressões roda);
+- qualquer passo `uses:` de action externa mata a execução na partida —
+  `actions/checkout@v4` sozinho reproduz, e `@v5` falha igual, o que descarta
+  depreciação de versão;
+- sem nenhum `uses:`, os jobs nascem e rodam.
+
+**Causa: a política de GitHub Actions do repositório está bloqueando actions
+externas** (modo "Allow select actions" sem liberar nem as do próprio GitHub,
+ou "local only"). Isso é configuração, só o dono altera:
+
+> `Settings` → `Actions` → `General` → **Actions permissions** →
+> marcar **"Allow all actions and reusable workflows"** (ou, no mínimo,
+> "Allow <owner>, and select non-<owner>, actions" + caixa
+> **"Allow actions created by GitHub"** — o workflow só usa actions oficiais).
+
+Depois de mudar, basta `Actions` → `Monitor de saúde` → `Run workflow` (ou
+esperar o cron das :17).
+
+**Atenção: o repositório está PRIVADO.** Duas consequências:
+
+1. O `CLAUDE.md` e toda a política de sanitização partem de "repositório
+   público" — privado hoje não fere nada, mas se a intenção é abrir depois,
+   nada muda; se a intenção é manter privado, o GitHub Pages de repositório
+   privado exige plano pago (senão o job `publicar` falha mesmo com a
+   política corrigida).
+2. Página pública de status em repo privado continua acessível a qualquer um
+   que tenha a URL do Pages — o Pages publicado é sempre público.
+
+## Atualização 24/08 ~18h UTC — política liberada, primeira execução real rodou
+
+O dono liberou a política de Actions e ligou o Pages. A execução nº 3 completou
+os 4 jobs: `verificar` ✓, `publicar` ✓ (página no ar), `persistir` ✓ (dados na
+`main`), `alertar` pulado (1ª execução ruim não alarma — correto). Resultado da
+primeira rodada real, item a item:
+
+- canário `__canary__`: **ok** — detecção validada em produção;
+- 13 funções publicadas e roteáveis;
+- **nenhum secret chegou à execução**: `prontidão não verificada (sem
+  PD_MONITOR_PING_TOKEN)`, `database: sem sessão`, `authed.flow: usuário-monitor
+  não configurado`, e o pulso de heartbeat foi *skipped* (HEARTBEAT_URL vazio).
+  Os quatro secrets do repositório não estão visíveis ao workflow — conferir se
+  foram criados como **Repository secrets** deste repositório (Settings →
+  Secrets and variables → Actions → aba "Secrets" → "Repository secrets"), e
+  não como Variables, secrets de Environment (`github-pages`) ou no repositório
+  errado;
+- `postgrest: HTTP 401` com a anon key (idêntica à do app, conferida no código
+  do PrimeDoctor). Hipóteses: transitório (upstream registrou "Supabase:
+  Partially Degraded Service") ou JWT secret do projeto rotacionado (o gateway
+  aceita a anon key como apikey literal, mas o PostgREST valida a ASSINATURA —
+  explica auth/storage/functions ok com REST 401). Se persistir nas próximas
+  execuções com os secrets configurados (bearer vira o token da sessão), o
+  item resolve sozinho; se persistir mesmo assim, é rotação de chave.
+
+**Defeito real pego pela execução nº 4 (cron, enfileirada atrás da nº 3):**
+ela nasceu com o SHA de antes do commit de dados da nº 3 — o `persistir`
+conflitou em add/add nas 5 tentativas (o `alertar` disparou por isso,
+corretamente), e o `verificar` rodou sem enxergar o histórico, então a regra
+de "2 ruins consecutivas ⇒ alarme" não contou a segunda como segunda. Conserto
+nesta branch: `ref: main` nos dois checkouts. Até chegar à `main`, o cron
+horário sozinho não sofre disso (só execuções enfileiradas atrás de outra).
+
+**Workflow Jekyll intruso**: ao ligar o Pages, o assistente do GitHub commitou
+`.github/workflows/jekyll-gh-pages.yml` na `main` (9f9257c). Ele deploya o
+README renderizado por cima do painel a cada push na `main` (os commits do
+monitor têm `[skip ci]`, mas pushes manuais disparam os dois deploys em
+corrida). A remoção está nesta branch.
+
 ## Tarefas, em ordem
 
-### 1. Commitar e enviar o que ficou pendente
+### 1. ~~Commitar e enviar o que ficou pendente~~ — FEITO (58d3ffc)
+
+### 1b. ~~Destravar a política de Actions~~ — FEITO pelo dono (24/08 ~17:33 UTC)
+
+### 1c. Fazer os secrets chegarem ao workflow — pendente, só o dono consegue
+
+### 1-original. Commitar e enviar o que ficou pendente
 
 ```bash
 cd D:\GitHub\primedoctor-monitor-saude

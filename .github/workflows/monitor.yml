@@ -42,8 +42,14 @@ jobs:
       alarm: ${{ steps.resultado.outputs.alarm }}
       resumo: ${{ steps.resultado.outputs.resumo }}
     steps:
+      # ref: main — a ponta ATUAL, não o SHA que disparou a execução. Uma
+      # execução que ficou na fila atrás de outra (concurrency) nasce com um
+      # SHA anterior ao commit de dados da execução da frente; sem isto, ela
+      # roda sem enxergar o histórico (quebra a regra de "2 execuções ruins
+      # consecutivas") e o persistir conflita em add/add nos data/*.
       - uses: actions/checkout@v4
         with:
+          ref: main
           fetch-depth: 1
           persist-credentials: false
 
@@ -156,8 +162,11 @@ jobs:
     permissions:
       contents: write
     steps:
+      # ref: main pelo mesmo motivo do job verificar: o commit vai para a
+      # ponta da main, então é dela que o checkout tem que partir.
       - uses: actions/checkout@v4
         with:
+          ref: main
           fetch-depth: 1
 
       - uses: actions/download-artifact@v4

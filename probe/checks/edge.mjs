@@ -1,5 +1,6 @@
 import { CONFIG, STATUS, worstStatus, statusFromLatency } from '../config.mjs';
 import { timedFetch } from '../lib/http.mjs';
+import { scrub } from '../lib/sanitize.mjs';
 
 const T = CONFIG.thresholds;
 
@@ -215,7 +216,7 @@ async function readinessPing(url, anonKey, slug) {
     return { state: 'sem-ping', missing: [], detail: `HTTP ${r.status}` };
   }
   if (body.reason === 'ping_desativado') {
-    return { state: 'desativado', missing: [], detail: body.detail || '' };
+    return { state: 'desativado', missing: [], detail: scrub(body.detail) || '' };
   }
   if (r.status === 401) {
     return { state: 'indeterminado', missing: [], detail: 'token de ping recusado' };
@@ -223,11 +224,27 @@ async function readinessPing(url, anonKey, slug) {
   if (body.ready === true) {
     return { state: 'pronta', missing: [], detail: '' };
   }
+  const missing = soNomesDeEnv(body.missingRequired);
   return {
     state: 'faltando',
-    missing: Array.isArray(body.missingRequired) && body.missingRequired.length
-      ? body.missingRequired
-      : ['verificação extra falhou'],
-    detail: body.extra?.detail || '',
+    missing: missing.length ? missing : ['verificação extra falhou'],
+    detail: scrub(body.extra?.detail) || '',
   };
+}
+
+// `missingRequired` DEVERIA conter só nomes de variáveis de ambiente — mas quem
+// garante isso é o `monitorPing.ts`, que vive noutro repositório e é editado
+// pelo Lovable. Se ele um dia regredir e embutir texto de erro (que no
+// PrimeDoctor carrega telefone de paciente e valores de linha do Postgres),
+// esse texto iria direto para o `detail` publicado e para o histórico
+// permanente deste repositório. Allowlist, como manda a regra nº 1: só o que
+// tem formato de nome de variável passa; o resto vira contagem.
+const NOME_DE_ENV = /^[A-Z][A-Z0-9_]{0,63}$/;
+
+function soNomesDeEnv(lista) {
+  if (!Array.isArray(lista)) return [];
+  const nomes = lista.filter((v) => typeof v === 'string' && NOME_DE_ENV.test(v)).slice(0, 10);
+  const suprimidas = lista.length - nomes.length;
+  if (suprimidas > 0) nomes.push(`(+${suprimidas} entrada(s) sem formato de nome de variável, suprimida(s))`);
+  return nomes;
 }
