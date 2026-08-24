@@ -1,10 +1,6 @@
 name: Diagnóstico temporário
 
 on:
-  schedule:
-    # De hora em hora. Minuto 17 evita o pico do topo da hora, onde o
-    # agendamento do GitHub costuma atrasar bastante.
-    - cron: '17 * * * *'
   workflow_dispatch:
     inputs:
       skip_browser:
