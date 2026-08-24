@@ -34,15 +34,6 @@ jobs:
       alarm: ${{ steps.resultado.outputs.alarm }}
       resumo: ${{ steps.resultado.outputs.resumo }}
     steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 1
-          persist-credentials: false
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-
       # --ignore-scripts: uma dependência transitiva maliciosa não roda código
       # no mesmo job que carrega a senha de produção. Sem fallback para
       # `npm install`: lockfile divergente tem que falhar alto, não silenciar.
@@ -111,10 +102,6 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 1
-
       - name: Commit e push
         env:
           OVERALL: ${{ needs.verificar.outputs.overall }}
