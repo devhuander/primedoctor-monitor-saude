@@ -1,7 +1,7 @@
 [
   {
     "startedAt": "2026-08-26T15:53:02.582Z",
-    "endedAt": null,
+    "endedAt": "2026-08-26T23:31:23.620Z",
     "worst": "fail",
     "checks": 3,
     "areas": [
@@ -13,7 +13,7 @@
       "backend/database"
     ],
     "blindSpots": 0,
-    "durationMinutes": null
+    "durationMinutes": 458
   },
   {
     "startedAt": "2026-08-24T23:34:49.701Z",
