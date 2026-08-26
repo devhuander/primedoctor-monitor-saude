@@ -1,5 +1,21 @@
 [
   {
+    "startedAt": "2026-08-26T15:53:02.582Z",
+    "endedAt": null,
+    "worst": "degraded",
+    "checks": 2,
+    "areas": [
+      "backend"
+    ],
+    "items": [
+      "backend/system-health",
+      "backend/postgrest",
+      "backend/database"
+    ],
+    "blindSpots": 0,
+    "durationMinutes": null
+  },
+  {
     "startedAt": "2026-08-24T23:34:49.701Z",
     "endedAt": "2026-08-25T03:12:28.016Z",
     "worst": "degraded",
