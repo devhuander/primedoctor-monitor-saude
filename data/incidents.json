@@ -2,8 +2,8 @@
   {
     "startedAt": "2026-08-26T15:53:02.582Z",
     "endedAt": null,
-    "worst": "degraded",
-    "checks": 2,
+    "worst": "fail",
+    "checks": 3,
     "areas": [
       "backend"
     ],
