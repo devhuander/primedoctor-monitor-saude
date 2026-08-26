@@ -40,3 +40,4 @@
 {"t":"2026-08-26T09:02:02.482Z","s":"ok","c":0,"bd":0,"f":"ok","b":"ok","e":"ok","x":"ok","fp":"d5ec8e4d","lat":{"doc":541,"db":606,"edge":172,"load":952,"lcp":1132,"login":544},"bad":[]}
 {"t":"2026-08-26T09:57:44.518Z","s":"ok","c":0,"bd":0,"f":"ok","b":"ok","e":"ok","x":"ok","fp":"d5ec8e4d","lat":{"doc":633,"db":842,"edge":346,"load":1409,"lcp":1467,"login":417},"bad":[]}
 {"t":"2026-08-26T10:51:31.918Z","s":"ok","c":0,"bd":0,"f":"ok","b":"ok","e":"ok","x":"ok","fp":"d5ec8e4d","lat":{"doc":519,"db":605,"edge":187,"load":992,"lcp":1192,"login":513},"bad":[]}
+{"t":"2026-08-26T11:44:22.987Z","s":"degraded","c":0,"bd":1,"f":"ok","b":"degraded","e":"ok","x":"ok","fp":"d5ec8e4d","lat":{"doc":564,"db":1213,"edge":592,"load":1030,"lcp":1294,"login":500},"bad":["backend/system-health"]}
