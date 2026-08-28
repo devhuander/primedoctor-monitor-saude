@@ -7,6 +7,42 @@ explica o porquê de cada decisão de projeto.
 
 ---
 
+## 28/08 — o cron do GitHub degrada em repositório privado
+
+Medido nas execuções `schedule` reais: em 25/08 o cron das :17 disparava
+~de hora em hora com 30-50 min de atraso; a partir da noite de 26/08 abriu
+buracos de **4 a 11 horas** (26/08 19:19 → 23:30 → 27/08 09:46 → 20:29 →
+28/08 05:22). Não é defeito do YAML — quando dispara, conclui normalmente.
+É o agendador do GitHub, que a própria documentação define como best-effort
+("pode atrasar ou descartar sob carga"), e que na prática é severamente
+despriorizado em repositório **privado** no plano Free.
+
+Mitigação aplicada: `cron: '17,47 * * * *'` (duas tentativas/hora; as
+descartadas não custam nada). Isso melhora, mas **não garante** hora em hora.
+As soluções definitivas, em ordem de preferência:
+
+1. **Tornar o repositório público** — é a premissa de todo o projeto
+   (CLAUDE.md regra 1: a sanitização inteira existe para isso), zera o custo
+   de minutos de Actions e melhora a prioridade do agendador. Atenção antes:
+   nada de segredo no histórico (a revisão de segurança de 24/08 não achou;
+   os secrets vivem só em GitHub Secrets).
+2. **Disparador externo**: um cron confiável (ex.: cron-job.org, gratuito)
+   fazendo POST de hora em hora em
+   `https://api.github.com/repos/devhuander/primedoctor-monitor-saude/actions/workflows/monitor.yml/dispatches`
+   com corpo `{"ref":"main"}` e o PAT fine-grained que já existe (escopo
+   Actions: write só neste repo). GitHub cron vira redundância.
+3. Enquanto (1)/(2) não acontecem: ajustar o *grace period* do check no
+   healthchecks.io para ~2-3h, senão o dead-man's switch alarma por culpa do
+   agendador, não do PrimeDoctor.
+
+**Custo de minutos (só relevante enquanto privado):** cada execução cobra
+~4 min (jobs arredondados para cima). 1/hora ≈ 2.900 min/mês — já acima dos
+2.000 do plano Free; 2 tentativas/hora, se o agendador voltar a disparar
+todas, ≈ 5.800/mês. Público: ilimitado. Se for manter privado por muito
+tempo, considerar voltar a 1 tentativa/hora e usar a solução (2).
+
+---
+
 ## Situação em 21/08/2026
 
 ### Já concluído e publicado

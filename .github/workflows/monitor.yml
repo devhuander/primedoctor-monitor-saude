@@ -2,9 +2,16 @@ name: Monitor de saúde
 
 on:
   schedule:
-    # De hora em hora. Minuto 17 evita o pico do topo da hora, onde o
-    # agendamento do GitHub costuma atrasar bastante.
-    - cron: '17 * * * *'
+    # Duas tentativas por hora. O agendador do GitHub é best-effort e a
+    # documentação avisa que execuções agendadas podem ser ATRASADAS OU
+    # DESCARTADAS sob carga — em repositório privado no plano Free isso é
+    # severo: medido em 26-28/08/2026, o cron único das :17 abriu buracos de
+    # 4 a 11 horas. Tentativa descartada não custa nada; tentativa extra que
+    # dispara custa ~2 min de runner. Isto MITIGA, não garante: o conserto
+    # definitivo é um disparador externo batendo no workflow_dispatch (ou
+    # tornar o repositório público, que muda a prioridade e zera o custo de
+    # minutos) — ver HANDOFF.md.
+    - cron: '17,47 * * * *'
   workflow_dispatch:
     inputs:
       skip_browser:
