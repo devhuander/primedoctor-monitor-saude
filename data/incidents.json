@@ -1,5 +1,23 @@
 [
   {
+    "startedAt": "2026-08-28T17:05:51.015Z",
+    "endedAt": null,
+    "worst": "fail",
+    "checks": 2,
+    "areas": [
+      "backend",
+      "carregamento"
+    ],
+    "items": [
+      "backend/auth",
+      "backend/postgrest",
+      "experience/authed.flow",
+      "backend/system-health"
+    ],
+    "blindSpots": 0,
+    "durationMinutes": null
+  },
+  {
     "startedAt": "2026-08-26T15:53:02.582Z",
     "endedAt": "2026-08-26T23:31:23.620Z",
     "worst": "fail",
