@@ -52,3 +52,4 @@
 {"t":"2026-08-28T05:23:13.726Z","s":"ok","c":0,"bd":0,"f":"ok","b":"ok","e":"ok","x":"ok","fp":"52689c11","lat":{"doc":490,"db":815,"edge":259,"load":880,"lcp":1051,"login":528},"bad":[]}
 {"t":"2026-08-28T17:05:51.015Z","s":"fail","c":0,"bd":1,"f":"ok","b":"fail","e":"ok","x":"fail","fp":"699aa91b","lat":{"doc":528,"db":15000,"edge":579,"load":1368,"lcp":1642,"login":null},"bad":["backend/auth","backend/postgrest","experience/authed.flow"]}
 {"t":"2026-08-28T17:13:02.685Z","s":"degraded","c":0,"bd":1,"f":"ok","b":"degraded","e":"ok","x":"ok","fp":"699aa91b","lat":{"doc":467,"db":914,"edge":377,"load":1208,"lcp":1691,"login":455},"bad":["backend/system-health"]}
+{"t":"2026-08-28T17:33:26.373Z","s":"degraded","c":0,"bd":1,"f":"ok","b":"degraded","e":"ok","x":"ok","fp":"699aa91b","lat":{"doc":649,"db":1461,"edge":615,"load":1300,"lcp":1611,"login":389},"bad":["backend/system-health"]}
