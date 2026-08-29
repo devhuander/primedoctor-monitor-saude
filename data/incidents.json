@@ -3,12 +3,14 @@
     "startedAt": "2026-08-29T13:51:53.209Z",
     "endedAt": null,
     "worst": "degraded",
-    "checks": 2,
+    "checks": 3,
     "areas": [
-      "backend"
+      "backend",
+      "front-end"
     ],
     "items": [
-      "backend/system-health"
+      "backend/system-health",
+      "frontend/bundles"
     ],
     "blindSpots": 0,
     "durationMinutes": null
