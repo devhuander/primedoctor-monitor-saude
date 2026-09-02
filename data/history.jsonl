@@ -81,3 +81,4 @@
 {"t":"2026-09-02T01:27:06.547Z","s":"ok","c":0,"bd":0,"f":"ok","b":"ok","e":"ok","x":"ok","fp":"ed960f6f","lat":{"doc":360,"db":419,"edge":183,"load":1038,"lcp":1249,"login":548},"bad":[]}
 {"t":"2026-09-02T06:27:30.579Z","s":"ok","c":0,"bd":0,"f":"ok","b":"ok","e":"ok","x":"ok","fp":"ed960f6f","lat":{"doc":513,"db":567,"edge":202,"load":1024,"lcp":1501,"login":487},"bad":[]}
 {"t":"2026-09-02T11:45:59.878Z","s":"degraded","c":0,"bd":1,"f":"ok","b":"degraded","e":"ok","x":"ok","fp":"ed960f6f","lat":{"doc":532,"db":3440,"edge":396,"load":1041,"lcp":1461,"login":488},"bad":["backend/system-health"]}
+{"t":"2026-09-02T15:21:58.643Z","s":"ok","c":0,"bd":0,"f":"ok","b":"ok","e":"ok","x":"ok","fp":"ed960f6f","lat":{"doc":381,"db":544,"edge":204,"load":1020,"lcp":1320,"login":347},"bad":[]}
