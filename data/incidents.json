@@ -1,5 +1,19 @@
 [
   {
+    "startedAt": "2026-09-23T10:05:17.407Z",
+    "endedAt": null,
+    "worst": "degraded",
+    "checks": 2,
+    "areas": [
+      "backend"
+    ],
+    "items": [
+      "backend/system-health"
+    ],
+    "blindSpots": 0,
+    "durationMinutes": null
+  },
+  {
     "startedAt": "2026-09-20T19:48:26.918Z",
     "endedAt": "2026-09-21T00:32:26.142Z",
     "worst": "fail",
