@@ -223,3 +223,4 @@
 {"t":"2026-09-23T19:05:54.630Z","s":"ok","c":0,"bd":0,"f":"ok","b":"ok","e":"ok","x":"ok","fp":"a56e0d0e","lat":{"doc":608,"db":824,"edge":319,"load":612,"lcp":1109,"login":537},"bad":[]}
 {"t":"2026-09-23T22:20:26.447Z","s":"degraded","c":0,"bd":1,"f":"degraded","b":"degraded","e":"ok","x":"ok","fp":"91ba8e7c","lat":{"doc":1539,"db":1546,"edge":618,"load":540,"lcp":881,"login":411},"bad":["frontend/document","frontend/bundles","backend/system-health"]}
 {"t":"2026-09-24T00:55:07.179Z","s":"ok","c":0,"bd":0,"f":"ok","b":"ok","e":"ok","x":"ok","fp":"5dc308ec","lat":{"doc":737,"db":809,"edge":312,"load":648,"lcp":1013,"login":389},"bad":[]}
+{"t":"2026-09-24T06:13:25.557Z","s":"degraded","c":0,"bd":1,"f":"ok","b":"degraded","e":"ok","x":"ok","fp":"5b60074b","lat":{"doc":889,"db":1261,"edge":598,"load":585,"lcp":1018,"login":381},"bad":["backend/system-health"]}
