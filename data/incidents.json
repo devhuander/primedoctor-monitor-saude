@@ -1,5 +1,19 @@
 [
   {
+    "startedAt": "2026-09-28T00:00:12.276Z",
+    "endedAt": null,
+    "worst": "degraded",
+    "checks": 2,
+    "areas": [
+      "front-end"
+    ],
+    "items": [
+      "frontend/static"
+    ],
+    "blindSpots": 0,
+    "durationMinutes": null
+  },
+  {
     "startedAt": "2026-09-23T10:05:17.407Z",
     "endedAt": "2026-09-23T19:05:54.630Z",
     "worst": "degraded",
